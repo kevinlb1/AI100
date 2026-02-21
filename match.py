@@ -8,7 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import multiprocessing
 import time
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any
 
 
 def choose_even_k(n: int, M: int) -> Tuple[int, bool]:
@@ -672,6 +672,177 @@ def solve_lab_ortools(
 
     if plot:
         visualize_results(ids, m_scores, s_scores, n=n)
+
+
+def solve_with_preferences(
+    topic_titles: List[str],
+    preferences: List[List[int]],
+    M: int = 4,
+    time_limit_s: float | None = 10,
+    workers: int | None = None,
+    lexicographic_overlap_tiebreak: bool = True,
+    weight_W: int = 1000,
+) -> Dict[str, Any]:
+    """Solve assignment problem from explicit topics and voting matrix.
+
+    Args:
+        topic_titles: List of topic names, one per student/topic.
+        preferences: n x n utility matrix in {0..5}.
+        M: Group size upper bound.
+    """
+    n = len(topic_titles)
+    if n == 0:
+        raise ValueError("At least one topic is required")
+    if any(len(row) != n for row in preferences):
+        raise ValueError("preferences must be an n x n matrix")
+
+    v = preferences
+    r = list(range(n))
+    topics = range(n)
+    students = range(n)
+
+    K, _ = choose_even_k(n, M)
+
+    model = cp_model.CpModel()
+    g = [model.NewBoolVar(f"g_{j}") for j in topics]
+    p = [model.NewBoolVar(f"p_{j}") for j in topics]
+    model.Add(p[1] == 1) if n >= 2 else model.Add(p[0] == 1)
+    model.Add(sum(g) == K)
+
+    u = []
+    for j in topics:
+        uj = model.NewBoolVar(f"u_{j}")
+        model.Add(uj <= g[j])
+        model.Add(uj <= p[j])
+        model.Add(uj >= g[j] + p[j] - 1)
+        u.append(uj)
+    model.Add(sum(u) == K // 2)
+
+    Main, Shadow, MainScore, ShadowScore = [], [], [], []
+    main_is: Dict[Tuple[int, int], cp_model.IntVar] = {}
+    shadow_is: Dict[Tuple[int, int], cp_model.IntVar] = {}
+
+    for i in students:
+        allowed = [j for j in topics if v[i][j] > 0]
+        if len(allowed) < 2:
+            raise ValueError(
+                f"Student {i} has fewer than 2 non-veto topics (needs main != shadow)."
+            )
+
+        main_i = model.NewIntVarFromDomain(cp_model.Domain.FromValues(allowed), f"Main_{i}")
+        shadow_i = model.NewIntVarFromDomain(cp_model.Domain.FromValues(allowed), f"Shadow_{i}")
+        Main.append(main_i)
+        Shadow.append(shadow_i)
+
+        model.Add(main_i != shadow_i)
+
+        g_main_i = model.NewIntVar(0, 1, f"gMain_{i}")
+        g_shadow_i = model.NewIntVar(0, 1, f"gShadow_{i}")
+        model.AddElement(main_i, g, g_main_i)
+        model.AddElement(shadow_i, g, g_shadow_i)
+        model.Add(g_main_i == 1)
+        model.Add(g_shadow_i == 1)
+
+        p_main_i = model.NewIntVar(0, 1, f"pMain_{i}")
+        p_shadow_i = model.NewIntVar(0, 1, f"pShadow_{i}")
+        model.AddElement(main_i, p, p_main_i)
+        model.AddElement(shadow_i, p, p_shadow_i)
+        model.Add(p_main_i + p_shadow_i == 1)
+
+        model.Add(main_i == r[i]).OnlyEnforceIf(g[r[i]])
+
+        ms = model.NewIntVar(0, 5, f"MainScore_{i}")
+        ss = model.NewIntVar(0, 5, f"ShadowScore_{i}")
+        model.AddElement(main_i, v[i], ms)
+        model.AddElement(shadow_i, v[i], ss)
+        MainScore.append(ms)
+        ShadowScore.append(ss)
+
+        for j in allowed:
+            b = model.NewBoolVar(f"main_is_{i}_{j}")
+            model.Add(main_i == j).OnlyEnforceIf(b)
+            model.Add(main_i != j).OnlyEnforceIf(b.Not())
+            main_is[(i, j)] = b
+
+            cvar = model.NewBoolVar(f"shadow_is_{i}_{j}")
+            model.Add(shadow_i == j).OnlyEnforceIf(cvar)
+            model.Add(shadow_i != j).OnlyEnforceIf(cvar.Not())
+            shadow_is[(i, j)] = cvar
+
+    for j in topics:
+        main_count = sum(main_is[(i, j)] for i in students if (i, j) in main_is)
+        shadow_count = sum(shadow_is[(i, j)] for i in students if (i, j) in shadow_is)
+        model.Add(main_count <= M * g[j])
+        model.Add(main_count >= (M - 1) * g[j])
+        model.Add(shadow_count <= M * g[j])
+        model.Add(shadow_count >= (M - 1) * g[j])
+
+    overlap = []
+    for i in students:
+        for k in range(i + 1, n):
+            eq_main = model.NewBoolVar(f"eqMain_{i}_{k}")
+            eq_shadow = model.NewBoolVar(f"eqShadow_{i}_{k}")
+            model.Add(Main[i] == Main[k]).OnlyEnforceIf(eq_main)
+            model.Add(Main[i] != Main[k]).OnlyEnforceIf(eq_main.Not())
+            model.Add(Shadow[i] == Shadow[k]).OnlyEnforceIf(eq_shadow)
+            model.Add(Shadow[i] != Shadow[k]).OnlyEnforceIf(eq_shadow.Not())
+
+            z = model.NewBoolVar(f"z_{i}_{k}")
+            model.Add(z <= eq_main)
+            model.Add(z <= eq_shadow)
+            model.Add(z >= eq_main + eq_shadow - 1)
+            overlap.append(z)
+
+    utility10_var = model.NewIntVar(0, 150 * n, "utility10")
+    model.Add(utility10_var == sum(20 * MainScore[i] + 10 * ShadowScore[i] for i in students))
+    penalty_var = model.NewIntVar(0, n * (n - 1) // 2, "penalty")
+    model.Add(penalty_var == sum(overlap))
+
+    if lexicographic_overlap_tiebreak:
+        min_safe_W = (n * (M - 1)) // 2 + 1
+        W = max(weight_W, min_safe_W)
+        model.Maximize(W * utility10_var - penalty_var)
+    else:
+        model.Maximize(utility10_var - penalty_var)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.num_search_workers = multiprocessing.cpu_count() if workers is None else int(workers)
+    if time_limit_s is not None:
+        solver.parameters.max_time_in_seconds = float(time_limit_s)
+
+    status = solver.Solve(model)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        raise ValueError(f"No feasible solution found: {solver.StatusName(status)}")
+
+    selected_topics = [j for j in topics if solver.Value(g[j]) == 1]
+    assignments = []
+    for i in students:
+        main_topic = int(solver.Value(Main[i]))
+        shadow_topic = int(solver.Value(Shadow[i]))
+        assignments.append(
+            {
+                "student": i,
+                "main_topic": main_topic,
+                "main_title": topic_titles[main_topic],
+                "main_score": int(v[i][main_topic]),
+                "shadow_topic": shadow_topic,
+                "shadow_title": topic_titles[shadow_topic],
+                "shadow_score": int(v[i][shadow_topic]),
+            }
+        )
+
+    return {
+        "n": n,
+        "K": K,
+        "selected_topics": [
+            {"id": j, "title": topic_titles[j], "partition": "A" if solver.Value(p[j]) == 1 else "B"}
+            for j in selected_topics
+        ],
+        "assignments": assignments,
+        "utility": int(solver.Value(utility10_var)) / 10.0,
+        "penalty": int(solver.Value(penalty_var)),
+        "status": solver.StatusName(status),
+    }
 
 
 if __name__ == "__main__":
