@@ -1,0 +1,238 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, geometry}
+\geometry{a4paper, margin=1in}
+
+\title{Optimization Model: AI100 Student-Topic Matching}
+\author{}
+\date{\today}
+
+\begin{document}
+	
+	\maketitle
+	
+	\section{Problem Description}
+	Every student proposes a topic. A subset of these topics is selected ($K \approx n/4$) to become active groups. Students are assigned to one {Main} topic and one {Shadow} topic.
+	\begin{itemize}
+		\item Students rate topics by choosing integers on a scale of $0\dots5$.
+		\item $0$ is a strict veto.
+		\item Students cannot veto more than $n/4$ topics (enforced at data collection).
+		\item Students cannot veto the topic they proposed (enforced at data collection).
+		\item Active topics are split evenly into two partitions (A and B).
+		\item A student's Main and Shadow topics must be in \textit{opposite} partitions.
+		\item The purpose of partitions is to allow the lab to divide into presenters (main groups) and critiquers (shadow groups), such that each student is in exactly one such group. Then we can switch to the second partition, where all students reverse roles.
+		\item The optimization problem is to assign students both main and shadow groups that align with their preferences, placing twice as much weight on main vs shadow groups. Ties are broken by making the membership of shadow groups as different as possible from that of main groups, so that students work with as many different peers as possible given their preferences.
+	\end{itemize}
+	
+	\section{Indices and Sets}
+	\begin{itemize}
+		\item $i, k \in \{1, \dots, n\}$: Students.
+		\item $j, l \in \{1, \dots, n\}$: Topics.
+		\item $\Omega_i = \{j \mid v_{i,j} = 0\}$: Set of topics vetoed by student $i$.
+	\end{itemize}
+	
+	\section{Parameters}
+	\begin{itemize}
+		\item $v_{i,j} \in \{0, \ldots, 5\}$: Preference score.
+		\item $r_i \in \{1, \dots, n\}$: The topic index proposed by student $i$.
+		\item $M$: Maximum group size (e.g., 4).
+		\item $K$: Total active groups, chosen as the smallest even integer such that $K(M-1) \le n \le KM$. (If no such even $K$ exists for a given $(n,M)$, the model is infeasible unless the minimum group size is relaxed.)
+	\end{itemize}
+	
+	\section{Decision Variables}
+	\begin{itemize}
+		\item $m_{i,j} \in \{0, 1\}$: 1 if student $i$ is assigned topic $j$ as Main.
+		\item $s_{i,j} \in \{0, 1\}$: 1 if student $i$ is assigned topic $j$ as Shadow.
+		\item $p_j \in \{0, 1\}$: 1 if topic $j$ is in Partition A; 0 if Partition B.
+	\end{itemize}
+	
+	\section{Helper Variables (Linearization \& Penalties)}
+	\begin{itemize}
+		\item $g_j \in \{0, 1\}$: 1 if topic $j$ is selected.
+		\item $u_j \in \{0, 1\}$: Represents $g_j \cdot p_j$ (Active group in Partition A).
+		\item $\alpha_{i,j} \in \{0, 1\}$: Represents $m_{i,j} \cdot p_j$ (Main assignment is in Partition A).
+		\item $\beta_{i,j} \in \{0, 1\}$: Represents $s_{i,j} \cdot p_j$ (Shadow assignment is in Partition A).
+		\item $t_i \in \{1,\dots,n\}$: Index of student $i$'s Main topic, defined by $t_i = \sum_j j\, m_{i,j}$.
+		\item $h_i \in \{1,\dots,n\}$: Index of student $i$'s Shadow topic, defined by $h_i = \sum_j j\, s_{i,j}$.
+		\item $q^M_{i,k} \in \{0, 1\}$: Ordering selector used when enforcing $t_i \ne t_k$ for $i<k$.
+		\item $q^S_{i,k} \in \{0, 1\}$: Ordering selector used when enforcing $h_i \ne h_k$ for $i<k$.
+		\item $x_{i,k} \in \{0, 1\}$: 1 if students $i$ and $k$ ($i < k$) share a Main group.
+		\item $y_{i,k} \in \{0, 1\}$: 1 if students $i$ and $k$ ($i < k$) share a Shadow group.
+		\item $z_{i,k} \in \{0, 1\}$: 1 if students $i$ and $k$ share both a Main and a Shadow group.
+	\end{itemize}
+	
+	\section{Objective Function}
+	Maximize utility, weighting main groups twice as heavily as shadow groups, minus a small penalty for every pair of students who share both a main and a shadow group. The penalty is intended as a tie-breaker among equal-utility assignments; if strict lexicographic tie-breaking is desired without a two-phase solve, scale the utility term by a large weight $W$ and subtract the overlap (e.g., maximize $W\cdot(2\sum v m + \sum v s) - \sum z$ with $W > n(M-1)/2$).
+	\[
+	\text{Maximize } Z = 2 \sum_{i,j} v_{i,j} \cdot m_{i,j} + \sum_{i,j} v_{i,j} \cdot s_{i,j}  - 0.1 \sum_{i<k} z_{i,k}.
+	\]
+	
+	\section{Constraints}
+	
+	\subsection{Assignment Validity}
+	Each student is assigned to one Main and one Shadow topic.
+	\begin{align}
+		\sum_{j} m_{i,j} = 1, \quad \sum_{j} s_{i,j} = 1 \quad & \forall i \\
+	\end{align}
+	No student is assigned to the same main and shadow topics:
+	\begin{align}
+		m_{i,j} + s_{i,j} \le 1 \quad & \forall i, j \\
+	\end{align}
+	No student is assigned to a topic they vetoed:
+	\begin{align}
+		m_{i,j} = 0, \quad s_{i,j} = 0 \quad & \forall i, \forall j \in \Omega_i
+	\end{align}
+	
+	\subsection{Active Groups: Capacity, Number, Proposer Guarantee}
+	Both main and shadow groups always contain between $M-1$ and $M$ students. Note that these constraints also give the intended meaning to the $g$ variables: If $\sum_i m_{i,j}$ is zero, $g_j$ is forced to zero, and if $\sum_i m_{i,j}$ is at least $M-1$, $g_j$ is forced to one (so for $M\ge 3$, the case $\sum_i m_{i,j}=1$ cannot occur in a feasible solution).
+	\begin{align}
+		(M-1)g_j \le \sum_{i} m_{i,j} \le M g_j \quad & \forall j \\
+		(M-1)g_j \le \sum_{i} s_{i,j} \le M g_j \quad & \forall j 
+	\end{align}
+	There are exactly $K$ active groups.
+	\begin{align}
+		\sum_j g_j = K
+	\end{align}
+	Active groups always contain their proposers.
+	\begin{align}
+		g_{r_i} \le m_{i, r_i} \quad & \forall i
+	\end{align}
+	
+	\subsection{Partition Balance (Linearized)}
+	Exactly half of active groups are in Partition A:
+	\begin{align}
+		\quad \sum_j u_j &= K/2
+	\end{align}
+	Symmetry breaking (optional): fix a single topic to Partition~A to remove the global A/B flip symmetry:
+	\begin{align}
+		p_1 &= 1
+	\end{align}
+
+	Linearization constraints for $u_j = g_j \cdot p_j$, where $p_j$ denotes the partition assignment of topic~$j$ (without regard for whether it was selected).
+	\begin{align}
+		u_j \le g_j, \quad u_j &\le p_j, \quad u_j \ge g_j + p_j - 1 \quad  \forall j
+	\end{align}
+	
+	\subsection{Opposite Partition Requirement (Linearized)}
+	Each student has exactly one assignment in Partition A (implying the other is in B):
+	\begin{equation}
+		\sum_j (\alpha_{i,j} + \beta_{i,j}) = 1 \quad \forall i
+	\end{equation}
+	Linearization constraints for $\alpha_{i,j} = m_{i,j} \cdot p_j$:
+	\begin{equation}
+		\alpha_{i,j} \le m_{i,j}, \quad \alpha_{i,j} \le p_j, \quad \alpha_{i,j} \ge m_{i,j} + p_j - 1 \quad \forall i, j
+	\end{equation}
+	Linearization constraints for $\beta_{i,j} = s_{i,j} \cdot p_j$:
+	\begin{equation}
+		\beta_{i,j} \le s_{i,j}, \quad \beta_{i,j} \le p_j, \quad \beta_{i,j} \ge s_{i,j} + p_j - 1 \quad \forall i, j
+	\end{equation}
+	
+	\subsection{Symmetry Breaking (Social Overlap)}
+The overlap indicators $x_{i,k}$, $y_{i,k}$ and $z_{i,k}$ are used to penalize pairs of students who share both a Main and a Shadow group. The standard ``OR over topics'' linearization introduces $O(n^3)$ constraints. Because each student is assigned to exactly one Main topic and one Shadow topic, we can instead use an $O(n^2)$ encoding by introducing integer topic-index variables $t_i$ and $h_i$.
+
+\paragraph{Define topic-index variables (linear in $m$ and $s$).}
+\begin{align}
+t_i &= \sum_{j=1}^n j\, m_{i,j} \quad &\forall i\\
+h_i &= \sum_{j=1}^n j\, s_{i,j} \quad &\forall i
+\end{align}
+Because $\sum_j m_{i,j}=1$ and $m_{i,j}\in\{0,1\}$, each $t_i$ is the unique topic index assigned as Main (and similarly $h_i$ for Shadow).
+
+\paragraph{Encode $x_{i,k} \leftrightarrow (t_i=t_k)$ with $O(1)$ constraints per pair.}
+Let $B=n$ (a valid big-$M$ bound since $t_i-t_k\in\{-(n-1),\dots,n-1\}$). For all $i<k$:
+\begin{align}
+t_i - t_k &\le B(1-x_{i,k}) \\
+t_k - t_i &\le B(1-x_{i,k}) \\
+t_i - t_k &\le -1 + B\bigl(x_{i,k} + (1-q^M_{i,k})\bigr) \\
+t_k - t_i &\le -1 + B\bigl(x_{i,k} + q^M_{i,k}\bigr)
+\end{align}
+When $x_{i,k}=1$, the first two constraints force $t_i=t_k$. When $x_{i,k}=0$, the last two constraints force $t_i\ne t_k$ by selecting either $t_i\le t_k-1$ or $t_k\le t_i-1$ via $q^M_{i,k}$.
+
+\paragraph{Encode $y_{i,k} \leftrightarrow (h_i=h_k)$ analogously.}
+For all $i<k$:
+\begin{align}
+h_i - h_k &\le B(1-y_{i,k}) \\
+h_k - h_i &\le B(1-y_{i,k}) \\
+h_i - h_k &\le -1 + B\bigl(y_{i,k} + (1-q^S_{i,k})\bigr) \\
+h_k - h_i &\le -1 + B\bigl(y_{i,k} + q^S_{i,k}\bigr)
+\end{align}
+
+\paragraph{Trigger penalty if the same pair shares both a Main and a Shadow group.}
+For all $i<k$:
+\begin{align}
+z_{i,k} &\ge x_{i,k} + y_{i,k} - 1\\
+z_{i,k} &\le x_{i,k}\\
+z_{i,k} &\le y_{i,k}
+\end{align}
+
+\section{Constraint Programming Translation (CP-SAT)}
+	This MIP can be translated into a constraint program with the same high-level structure, but typically with fewer auxiliary variables and stronger propagation.
+
+	\subsection{Key modeling choice: replace one-hot assignment matrices with integer topic variables}
+	Instead of binary assignment matrices $m_{i,j}$ and $s_{i,j}$, introduce integer decision variables:
+	\[
+		\text{Main}_i \in \{ j \mid v_{i,j} > 0 \}, \qquad \text{Shadow}_i \in \{ j \mid v_{i,j} > 0 \}.
+	\]
+	The veto constraints are enforced by restricting domains. Assignment validity is:
+	\[
+		\text{Main}_i \ne \text{Shadow}_i \quad \forall i.
+	\]
+
+	\subsection{Active topics and partitions}
+	Keep Boolean variables $g_j \in \{0,1\}$ and $p_j \in \{0,1\}$. Enforce the number of active topics and partition balance exactly as in the MIP:
+	\[
+		\sum_j g_j = K,\qquad \sum_j (g_j \wedge p_j) = K/2.
+	\]
+	In CP-SAT (and other CP systems with \texttt{element} constraints), you can enforce that a student's assigned topics are active using element selection:
+	\[
+		g_{\text{Main}_i} = 1,\qquad g_{\text{Shadow}_i} = 1 \quad \forall i.
+	\]
+	Similarly, enforce the opposite-partition requirement with element selection:
+	\[
+		p_{\text{Main}_i} + p_{\text{Shadow}_i} = 1 \quad \forall i.
+	\]
+
+	\subsection{Capacity constraints}
+	Capacity constraints can be expressed by counting equalities. For each topic $j$, define counts
+	\[
+		\text{MainCount}_j = |\{ i : \text{Main}_i = j\}|,\qquad \text{ShadowCount}_j = |\{ i : \text{Shadow}_i = j\}|.
+	\]
+	Then enforce (as in the MIP):
+	\[
+		(M-1)g_j \le \text{MainCount}_j \le Mg_j,\qquad (M-1)g_j \le \text{ShadowCount}_j \le Mg_j \quad \forall j.
+	\]
+	In CP-SAT, these counts are typically implemented by introducing reified equalities $(\text{Main}_i=j)$ and summing them.
+
+	\subsection{Proposer guarantee}
+	The proposer constraint becomes a conditional equality:
+	\[
+		g_{r_i} = 1 \Rightarrow \text{Main}_i = r_i \quad \forall i.
+	\]
+
+	\subsection{Overlap penalty in $O(n^2)$}
+	With integer topic variables, overlap indicators can be defined with reified equalities:
+	\[
+		e^{M}_{i,k} \leftrightarrow (\text{Main}_i = \text{Main}_k),\qquad e^{S}_{i,k} \leftrightarrow (\text{Shadow}_i = \text{Shadow}_k),
+	\]
+	and then
+	\[
+		z_{i,k} \leftrightarrow (e^{M}_{i,k} \wedge e^{S}_{i,k}) \quad \forall i<k.
+	\]
+	This uses $O(n^2)$ Boolean variables and constraints, avoiding the $O(n^3)$ ``OR over topics'' construction.
+
+	\subsection{Objective and lexicographic tie-breaking}
+	Preferences are accumulated using element constraints:
+	\[
+		\text{MainScore}_i = v_{i,\text{Main}_i},\qquad \text{ShadowScore}_i = v_{i,\text{Shadow}_i}.
+	\]
+	The CP-SAT objective can match the scaled MIP objective:
+	\[
+		\max\; 2\sum_i \text{MainScore}_i + \sum_i \text{ShadowScore}_i - \epsilon \sum_{i<k} z_{i,k}.
+	\]
+	If you want the overlap term to act as a strict tie-breaker without a two-phase solve, maximize a weighted objective
+	\[
+		\max\; W \cdot \Bigl(2\sum_i \text{MainScore}_i + \sum_i \text{ShadowScore}_i\Bigr)\;-\;\sum_{i<k} z_{i,k},
+	\]
+	with $W$ chosen larger than the maximum possible overlap count. A sufficient bound is $W > n(M-1)/2$ (each student can overlap with at most $M-1$ peers), so for typical class sizes $n\le 100$ with $M=4$, a fixed choice like $W=1000$ is comfortably safe.
+
+
+\end{document}
