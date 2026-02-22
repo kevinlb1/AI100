@@ -285,6 +285,67 @@ def generate_preferences_by_category_mode3(
 
 
 
+def generate_preferences_by_category_uniform(
+    n: int,
+    C: int,
+    seed: int,
+) -> Tuple[List[List[int]], List[int], List[List[float]], List[int]]:
+    """Category-based generator with real-valued utilities, vetoes, and quintile binning.
+
+    Procedure:
+      - Draw base_real[i][c] ~ Uniform(1,5) for each student/category.
+      - Topic category cat[j] is proposer j's argmax category (tie-broken randomly).
+      - For each student i, set base for own proposal category cat[i] to 4.5.
+      - Topic real preference: base_i[cat[j]] + Uniform(-1,1).
+      - Veto least favorite quarter of topics (n//4): score 0.
+      - Remaining topics are ranked by real preference and binned evenly into
+        five groups: top fifth->5, next->4, ..., last->1.
+    """
+    if n <= 0:
+        raise ValueError("n must be positive")
+    if C <= 0:
+        raise ValueError("C must be positive.")
+
+    rng = random.Random(seed)
+    topics = range(n)
+    r = list(range(n))
+
+    base_real: List[List[float]] = [[rng.uniform(1.0, 5.0) for _ in range(C)] for _ in range(n)]
+
+    cat: List[int] = []
+    for j in topics:
+        best = max(base_real[j])
+        best_cs = [c for c in range(C) if abs(base_real[j][c] - best) <= 1e-12]
+        cat.append(rng.choice(best_cs))
+
+    real_scores: List[List[float]] = []
+    for i in range(n):
+        own_cat = cat[i]
+        base_i = list(base_real[i])
+        base_i[own_cat] = 4.5
+        row: List[float] = []
+        for j in topics:
+            row.append(base_i[cat[j]] + rng.uniform(-1.0, 1.0))
+        real_scores.append(row)
+
+    v: List[List[int]] = []
+    veto_count = n // 4
+    for i in range(n):
+        order_asc = sorted(topics, key=lambda j: (real_scores[i][j], rng.random()))
+        veto = set(order_asc[:veto_count])
+        remaining = [j for j in topics if j not in veto]
+        order_desc = sorted(remaining, key=lambda j: (real_scores[i][j], rng.random()), reverse=True)
+        m = len(order_desc)
+        row = [0] * n
+        if m > 0:
+            for rank_idx, j in enumerate(order_desc):
+                bucket = int((rank_idx * 5) / m)  # 0..4
+                row[j] = 5 - bucket
+        v.append(row)
+
+    return v, r, base_real, cat
+
+
 class ProgressSummary(cp_model.CpSolverSolutionCallback):
     """Print a compact progress line each time CP-SAT finds a new incumbent."""
 
@@ -372,7 +433,7 @@ def solve_lab_ortools(
     filename: str = "assignments_ortools.csv",
     time_limit_s: float | None = None,
     seed: int = 42,
-    pref_mode: str = "category",  # "category" or "random"
+    pref_mode: str = "category_uniform",  # "category_uniform", "category", "category_mode3", or "random"
     lexicographic_overlap_tiebreak: bool = True,
     weight_W: int = 1000,
     plot: bool = True,
@@ -383,9 +444,13 @@ def solve_lab_ortools(
     """CP-SAT harness.
 
     - Uses an O(n^2) overlap encoding.
-    - Supports two preference generators (switch with pref_mode):
+    - Supports four preference generators (switch with pref_mode):
         * pref_mode="random": random raw topic utilities (1..5) + fixed-count vetoes
         * pref_mode="category": category utilities with ±1 noise + fixed-count vetoes
+        * pref_mode="category_mode3": category utilities peaked at 3 + fixed-count vetoes
+        * pref_mode="category_uniform": real-valued category utilities,
+          topic modifiers ±1, veto least quarter, then bin remaining topics into
+          quintiles mapped to scores 5..1
 
     Veto policy (both modes): after generating all raw scores, each student vetoes
     exactly n//4 topics by zeroing out the least-preferred topics, breaking ties randomly.
@@ -435,8 +500,10 @@ def solve_lab_ortools(
         v, r, base, cat = generate_preferences_by_category_mode3(n=n, C=C, seed=seed)
     elif pref_mode == "random":
         v, r, base, cat = generate_preferences_random(n=n, C=C, seed=seed)
+    elif pref_mode == "category_uniform":
+        v, r, base, cat = generate_preferences_by_category_uniform(n=n, C=C, seed=seed)
     else:
-        raise ValueError('pref_mode must be one of: "category", "category_mode3", "random"')
+        raise ValueError('pref_mode must be one of: "category_uniform", "category", "category_mode3", "random"')
 
     # Quick stats
     zeros_per_student = [sum(1 for j in topics if v[i][j] == 0) for i in students]
@@ -890,6 +957,11 @@ def solve_with_preferences_live(
 
     cb = LiveProgress()
     if progress_cb is not None:
+        try:
+            proto = model.Proto()
+            progress_cb(f"model stats: constraints={len(proto.constraints)} variables={len(proto.variables)}")
+        except Exception:
+            pass
         progress_cb("solve started")
     try:
         status = solver.SolveWithSolutionCallback(model, cb)  # type: ignore[attr-defined]
@@ -1123,9 +1195,15 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument(
         "--pref_mode",
-        choices=["category", "category_mode3", "random"],
-        default="category",
-        help="Preference generator: 'category' (favorite-based), 'category_mode3' (peaked at 3), or 'random' (i.i.d. raw scores).",
+        choices=["category_uniform", "category", "category_mode3", "random"],
+        default="category_uniform",
+        help=(
+            "Preference generator: "
+            "'category_uniform' (real category utilities + veto + quintile binning), "
+            "'category' (favorite-based), "
+            "'category_mode3' (peaked at 3), "
+            "or 'random' (i.i.d. raw scores)."
+        ),
     )
     parser.add_argument(
         "--time_limit_s",
