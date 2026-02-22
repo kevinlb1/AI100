@@ -285,7 +285,7 @@ def generate_preferences_by_category_mode3(
 
 
 
-def generate_preferences_by_category_uniform(
+def generate_preferences_by_category_uniform_real_binned(
     n: int,
     C: int,
     seed: int,
@@ -500,8 +500,8 @@ def solve_lab_ortools(
         v, r, base, cat = generate_preferences_by_category_mode3(n=n, C=C, seed=seed)
     elif pref_mode == "random":
         v, r, base, cat = generate_preferences_random(n=n, C=C, seed=seed)
-    elif pref_mode == "category_uniform":
-        v, r, base, cat = generate_preferences_by_category_uniform(n=n, C=C, seed=seed)
+    elif pref_mode in {"category_uniform", "category_uniform_real_binned"}:
+        v, r, base, cat = generate_preferences_by_category_uniform_real_binned(n=n, C=C, seed=seed)
     else:
         raise ValueError('pref_mode must be one of: "category_uniform", "category", "category_mode3", "random"')
 

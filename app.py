@@ -363,12 +363,10 @@ def ensure_students_and_preferences(class_id: int | None = None) -> None:
     class_id = class_id or get_current_class_id(conn)
     n = int(get_class_meta(conn, class_id, "n", "8"))
     now = datetime.now(timezone.utc).isoformat()
-    default_names = shuffled_pool_for_class(COMMON_NAMES_100, class_id, 0x4C1B3A77)
-    default_topics = shuffled_pool_for_class(AI_TOPICS_FLAT, class_id, 0x9E3779B1)
     with conn:
         for i in range(n):
-            name = default_names[i] if i < len(default_names) else f"Student {i + 1}"
-            topic = default_topics[i] if i < len(default_topics) else f"Topic {i + 1}"
+            name = f"Student {i + 1}"
+            topic = f"Topic {i + 1}"
             conn.execute(
                 """
                 INSERT INTO students(class_id, id, name, topic_title) VALUES (?, ?, ?, ?)
@@ -999,7 +997,7 @@ def render_home() -> str:
         shadow_rank = group_rank.get(shadow_topic, 10_000)
         return (0, group_rank[main_topic], shadow_rank, sid)
 
-    def build_topic_chip(topic_id: int | None, is_shadow: bool, has_violation: bool = False) -> str:
+    def build_topic_chip(topic_id: int | None, is_shadow: bool) -> str:
         if topic_id is None or topic_id < 0 or topic_id >= n:
             return ""
         if topic_id in group_rank:
@@ -1011,8 +1009,6 @@ def render_home() -> str:
             label = f"T{topic_id + 1}"
         title = topic_titles_by_id.get(topic_id, f"Topic {topic_id + 1}")
         chip_class = "group-chip shadow-chip" if is_shadow else "group-chip main-chip"
-        if is_shadow and has_violation:
-            chip_class += " shadow-chip-violation"
         return (
             f"<span class='{chip_class}' "
             f"title='{'Shadow' if is_shadow else 'Main'} topic: {escape(title)}' "
@@ -1078,13 +1074,14 @@ def render_home() -> str:
         main_topic = main_topic_by_student.get(sid)
         has_overlap_violation = sid in overlap_violation_students
         main_chip = build_topic_chip(main_topic, is_shadow=False)
-        shadow_chip = build_topic_chip(shadow_topic, is_shadow=True, has_violation=has_overlap_violation)
-        group_badge = f"{main_chip}{shadow_chip}"
+        shadow_chip = build_topic_chip(shadow_topic, is_shadow=True)
+        violation_html = "<span class='shadow-violation-star' title='Main/shadow overlap violation'>*</span>" if has_overlap_violation else ""
         matrix_rows.append(
             f"<tr class='{row_class}' onclick='window.location.href=\"/student?sid={sid}\"'>"
             f"<td class='student-cell' title='{student_name}'>"
+            f"<span class='student-main-group'>{main_chip}</span>"
             f"<span class='student-name'>{student_name}</span>"
-            f"<span class='student-group'>{group_badge}</span>"
+            f"<span class='student-group-right'>{violation_html}{shadow_chip}</span>"
             f"</td>{''.join(cells)}</tr>"
         )
     return f"""
@@ -1116,6 +1113,21 @@ def render_home() -> str:
       {latest_html}
     </main>
     <script>
+      const THEME_MODE_KEY = 'adminThemeMode';
+      function applyThemeMode(mode) {{
+        const root = document.documentElement;
+        const next = (mode === 'light' || mode === 'dark') ? mode : 'system';
+        if (next === 'system') root.removeAttribute('data-theme');
+        else root.setAttribute('data-theme', next);
+      }}
+      function initThemeMode() {{
+        let mode = 'system';
+        try {{
+          const stored = localStorage.getItem(THEME_MODE_KEY);
+          if (stored) mode = stored;
+        }} catch (_err) {{}}
+        applyThemeMode(mode);
+      }}
       const homeFingerprint = {json.dumps(home_fingerprint)};
       const hasMatchedColumns = {str(has_selected_columns).lower()};
       const uiStateStorageKey = 'topic_match_home_ui_state_v1';
@@ -1239,10 +1251,13 @@ def render_home() -> str:
       const savedUiState = loadUiState();
       const initialExpand = !!(savedUiState && savedUiState.topicTitleExpanded);
       const initialFlow = (savedUiState && savedUiState.matrixFlowMode === 'scroll') ? 'scroll' : 'fit';
-      const initialHideUnmatched = !!(savedUiState && savedUiState.hideUnmatchedTopics && hasMatchedColumns);
+      const initialHideUnmatched = hasMatchedColumns
+        ? (savedUiState ? !!savedUiState.hideUnmatchedTopics : true)
+        : false;
       setTopicTitleExpanded(initialExpand);
       setMatrixFlowMode(initialFlow);
       setHideUnmatched(initialHideUnmatched);
+      initThemeMode();
       setInterval(refreshLockStatus, 2000);
       setInterval(refreshHomeIfChanged, 2000);
     </script>
@@ -1268,6 +1283,10 @@ def base_css() -> str:
       --topic-bg:#dbeafe;
       --topic-border:#8ab5ff;
       --topic-hover:rgba(37,99,235,.2);
+      --topic-selected-unmatched-bg:#cfd8e3;
+      --topic-selected-unmatched-border:#70839a;
+      --topic-unselected-unmatched-bg:#f8fafc;
+      --topic-unselected-unmatched-border:#e2e8f0;
       --score-0:#fee2e2;
       --score-1:#ffedd5;
       --score-2:#fef9c3;
@@ -1291,6 +1310,10 @@ def base_css() -> str:
         --topic-bg:#2a2a2a;
         --topic-border:#4a4a4a;
         --topic-hover:rgba(120,120,120,.28);
+        --topic-selected-unmatched-bg:#4b5563;
+        --topic-selected-unmatched-border:#a3afbf;
+        --topic-unselected-unmatched-bg:#20242b;
+        --topic-unselected-unmatched-border:#394150;
         --score-0:#3a2626;
         --score-1:#3a2f24;
         --score-2:#3a3523;
@@ -1314,6 +1337,10 @@ def base_css() -> str:
       --topic-bg:#dbeafe;
       --topic-border:#8ab5ff;
       --topic-hover:rgba(37,99,235,.2);
+      --topic-selected-unmatched-bg:#cfd8e3;
+      --topic-selected-unmatched-border:#70839a;
+      --topic-unselected-unmatched-bg:#f8fafc;
+      --topic-unselected-unmatched-border:#e2e8f0;
       --score-0:#fee2e2;
       --score-1:#ffedd5;
       --score-2:#fef9c3;
@@ -1337,6 +1364,10 @@ def base_css() -> str:
       --topic-bg:#2a2a2a;
       --topic-border:#4a4a4a;
       --topic-hover:rgba(120,120,120,.28);
+      --topic-selected-unmatched-bg:#4b5563;
+      --topic-selected-unmatched-border:#a3afbf;
+      --topic-unselected-unmatched-bg:#20242b;
+      --topic-unselected-unmatched-border:#394150;
       --score-0:#3a2626;
       --score-1:#3a2f24;
       --score-2:#3a3523;
@@ -1364,6 +1395,20 @@ def base_css() -> str:
     .topic:hover { filter:brightness(1.06); box-shadow:0 0 0 2px rgba(37,99,235,.18), 0 4px 10px var(--topic-hover); }
     .topic-main-match { font-weight:700; }
     .topic-shadow-match { opacity:.66; }
+    .topic-selected-unmatched {
+      background:var(--topic-selected-unmatched-bg) !important;
+      border-color:var(--topic-selected-unmatched-border) !important;
+      color:var(--text) !important;
+      opacity:.96;
+      box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--topic-selected-unmatched-border) 85%, transparent);
+    }
+    .topic-unselected-unmatched {
+      background:var(--topic-unselected-unmatched-bg) !important;
+      border-color:var(--topic-unselected-unmatched-border) !important;
+      color:var(--muted) !important;
+      opacity:.42;
+      box-shadow:none;
+    }
     .row { display:flex; gap:14px; flex-wrap:wrap; }
     .col { flex:1; min-width:320px; }
     .inline-finalize { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px; }
@@ -1388,7 +1433,8 @@ def base_css() -> str:
     .matrix-table .student-head, .matrix-table .student-cell { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .matrix-table .student-cell { display:flex; align-items:center; gap:6px; }
     .matrix-table .student-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
-    .matrix-table .student-group { margin-left:auto; display:inline-flex; align-items:center; gap:4px; }
+    .matrix-table .student-main-group { display:inline-flex; align-items:center; min-width:0; }
+    .matrix-table .student-group-right { margin-left:auto; display:inline-flex; align-items:center; gap:4px; min-width:0; }
     .matrix-table .topic-head { text-align:center; font-size:11px; padding:3px 1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text); }
     .matrix-table .group-head { font-weight:700; }
     .matrix-table .topic-group { font-size:9px; line-height:1; font-weight:700; }
@@ -1453,16 +1499,7 @@ def base_css() -> str:
     }
     .group-chip { display:inline-block; font-size:10px; font-weight:700; color:#0f766e; background:#ccfbf1; border:1px solid #99f6e4; border-radius:999px; padding:1px 6px; vertical-align:middle; position:relative; line-height:1.1; }
     .shadow-chip { font-size:7px; padding:1px 4px; }
-    .shadow-chip-violation::after {
-      content:'*';
-      position:absolute;
-      top:-6px;
-      right:-2px;
-      color:#ef4444;
-      font-size:12px;
-      font-weight:900;
-      line-height:1;
-    }
+    .shadow-violation-star { color:#ef4444; font-size:12px; font-weight:900; line-height:1; display:inline-block; }
     .active-pair-cell { font-weight:700; background-clip:padding-box; }
     .group-box-top, .group-box-mid, .group-box-bottom, .group-box-single {
       border-left:3px solid var(--gcolor, #22c55e) !important;
@@ -1508,27 +1545,36 @@ def render_student(sid: int) -> str:
     pref = get_pref_row(conn, class_id, sid, n)
     finalized = get_class_meta(conn, class_id, "finalized", "0") == "1"
     latest_id_row = conn.execute(
-        "SELECT id FROM match_runs WHERE class_id=? AND status IN ('optimal','feasible','interrupted') ORDER BY id DESC LIMIT 1",
+        """
+        SELECT mr.id
+        FROM match_runs mr
+        WHERE mr.class_id=?
+          AND mr.status IN ('optimal','feasible','interrupted')
+          AND EXISTS (SELECT 1 FROM selected_topics st WHERE st.run_id=mr.id)
+        ORDER BY mr.id DESC
+        LIMIT 1
+        """,
         (class_id,),
     ).fetchone()
     assignment = None
-    assignment_visual = {"main_topic": None, "shadow_topic": None, "main_color": "", "shadow_color": ""}
+    assignment_visual = {"main_topic": None, "shadow_topic": None, "main_color": "", "shadow_color": "", "selected_topics": []}
     if latest_id_row:
         run_id = int(latest_id_row[0])
+        selected_topic_ids_ordered = [
+            int(r[0])
+            for r in conn.execute(
+                """
+                SELECT topic_id
+                FROM selected_topics
+                WHERE run_id=?
+                ORDER BY CASE partition WHEN 'A' THEN 0 WHEN 'B' THEN 1 ELSE 2 END, topic_id
+                """,
+                (run_id,),
+            ).fetchall()
+        ]
         assignment = conn.execute("SELECT * FROM assignments WHERE run_id=? AND student_id=?", (run_id, sid)).fetchone()
+        assignment_visual["selected_topics"] = selected_topic_ids_ordered
         if assignment:
-            selected_topic_ids_ordered = [
-                int(r[0])
-                for r in conn.execute(
-                    """
-                    SELECT topic_id
-                    FROM selected_topics
-                    WHERE run_id=?
-                    ORDER BY CASE partition WHEN 'A' THEN 0 WHEN 'B' THEN 1 ELSE 2 END, topic_id
-                    """,
-                    (run_id,),
-                ).fetchall()
-            ]
             group_rank = {tid: idx for idx, tid in enumerate(selected_topic_ids_ordered)}
             group_palette = [
                 "#22c55e", "#06b6d4", "#f59e0b", "#a78bfa", "#ef4444", "#10b981",
@@ -1547,6 +1593,7 @@ def render_student(sid: int) -> str:
                 "shadow_topic": shadow_topic_id,
                 "main_color": color_for_gid(main_gid) if main_gid >= 0 else "#2563eb",
                 "shadow_color": color_for_gid(shadow_gid) if shadow_gid >= 0 else "#64748b",
+                "selected_topics": selected_topic_ids_ordered,
             }
     conn.close()
 
@@ -1584,11 +1631,27 @@ def render_student(sid: int) -> str:
       <span id='msg' class='muted'></span>
     </main>
     <script>
+      const THEME_MODE_KEY = 'adminThemeMode';
+      function applyThemeMode(mode) {{
+        const root = document.documentElement;
+        const next = (mode === 'light' || mode === 'dark') ? mode : 'system';
+        if (next === 'system') root.removeAttribute('data-theme');
+        else root.setAttribute('data-theme', next);
+      }}
+      function initThemeMode() {{
+        let mode = 'system';
+        try {{
+          const stored = localStorage.getItem(THEME_MODE_KEY);
+          if (stored) mode = stored;
+        }} catch (_err) {{}}
+        applyThemeMode(mode);
+      }}
       const sid = {sid};
       let editable = {editable};
       let topics = {topics_json};
       let scores = {pref_json};
       const assignmentVisual = {json.dumps(assignment_visual)};
+      const selectedTopicSet = new Set(Array.isArray(assignmentVisual.selected_topics) ? assignmentVisual.selected_topics : []);
       const vetoMax = Math.floor(topics.length / 4);
       const prefMsg = document.getElementById('msg');
       let prefSaveTimer = null;
@@ -1629,9 +1692,12 @@ def render_student(sid: int) -> str:
         const app = document.getElementById('app');
         const buckets = [];
         for (let s=5; s>=0; s--) {{
-          buckets.push(`<div class='bucket' data-score='${{s}}' ondragover='event.preventDefault()' ondrop='dropTopic(event, ${{s}})'><h3>Score ${{s}}</h3><div id='bucket-${{s}}' class='bucket-topics'></div></div>`);
+          const title = (s === 0)
+            ? `Score 0 <span id='vetoCount' class='muted' style='font-weight:500; font-size:12px;'>(0 / ${{vetoMax}} vetoes)</span>`
+            : `Score ${{s}}`;
+          buckets.push(`<div class='bucket' data-score='${{s}}' ondragover='event.preventDefault()' ondrop='dropTopic(event, ${{s}})'><h3>${{title}}</h3><div id='bucket-${{s}}' class='bucket-topics'></div></div>`);
         }}
-        app.innerHTML = `<div class='buckets'>${{buckets.join('')}}</div><p>Veto count: <span id='vetoCount'></span> / ${{vetoMax}}</p>`;
+        app.innerHTML = `<div class='buckets'>${{buckets.join('')}}</div>`;
         const orderedTopics = [...topics].sort((a, b) => {{
           if (scores[b.id] !== scores[a.id]) return scores[b.id] - scores[a.id];
           return a.id - b.id;
@@ -1652,6 +1718,12 @@ def render_student(sid: int) -> str:
               div.style.borderColor = assignmentVisual.shadow_color;
               div.style.background = hexToRgba(assignmentVisual.shadow_color, 0.18);
               div.style.boxShadow = `0 0 0 1px ${{hexToRgba(assignmentVisual.shadow_color, 0.28)}}`;
+            }}
+          }} else if (selectedTopicSet.size > 0) {{
+            if (selectedTopicSet.has(t.id)) {{
+              div.classList.add('topic-selected-unmatched');
+            }} else {{
+              div.classList.add('topic-unselected-unmatched');
             }}
           }}
           div.draggable = editable;
@@ -1678,7 +1750,8 @@ def render_student(sid: int) -> str:
 
       function updateVetoCount() {{
         const v = scores.filter(x => x === 0).length;
-        document.getElementById('vetoCount').innerText = String(v);
+        const el = document.getElementById('vetoCount');
+        if (el) el.innerText = `(${{v}} / ${{vetoMax}} vetoes)`;
       }}
 
       function dropTopic(ev, targetScore) {{
@@ -1824,6 +1897,7 @@ def render_student(sid: int) -> str:
       }}
       setInterval(refreshStudentMeta, 2000);
 
+      initThemeMode();
       applyEditableState();
       render();
     </script>
@@ -1865,6 +1939,8 @@ def render_admin() -> str:
           <label>Select current class:
             <select id='classSelect' onchange='onClassSelectChanged(this)'></select>
           </label>
+          <button type='button' onclick='createNewClass(this)'>Create new class</button>
+          <button type='button' class='button-danger' onclick='deleteCurrentClass(this)'>Delete current class</button>
         </p>
         <p><strong>Database management</strong></p>
         <p>
@@ -1979,6 +2055,7 @@ def render_admin() -> str:
       function populateClassSelect(classes, currentClassId) {{
         const select = document.getElementById('classSelect');
         if (!select) return;
+        if (!Array.isArray(classes) || classes.length === 0) return;
         const prev = select.value;
         select.innerHTML = '';
         (classes || []).forEach(c => {{
@@ -1987,10 +2064,6 @@ def render_admin() -> str:
           opt.textContent = c.name || `Class ${{c.id}}`;
           select.appendChild(opt);
         }});
-        const createOpt = document.createElement('option');
-        createOpt.value = '__create__';
-        createOpt.textContent = 'Create new class';
-        select.appendChild(createOpt);
         const target = String(currentClassId ?? '');
         if (target && Array.from(select.options).some(o => o.value === target)) {{
           select.value = target;
@@ -1998,25 +2071,43 @@ def render_admin() -> str:
           select.value = prev;
         }}
       }}
-      async function onClassSelectChanged(selectEl) {{
-        const value = String(selectEl.value || '');
-        if (value === '__create__') {{
-          const name = prompt('New class name:');
-          if (name === null) {{
-            await poll();
-            return;
-          }}
-          const nRaw = prompt('Number of students:', '8');
-          if (nRaw === null) {{
-            await poll();
-            return;
-          }}
-          const n = Math.max(4, Number(nRaw) || 8);
-          const data = await post('/api/admin/create_class', {{name, n}});
-          setAdminMsg(data.message || data.error || 'Completed', !data.__ok || !!data.error);
+      async function createNewClass(btn) {{
+        pulseButton(btn);
+        const name = prompt('New class name:');
+        if (name === null) {{
           await poll();
           return;
         }}
+        const nRaw = prompt('Number of students:', '8');
+        if (nRaw === null) {{
+          await poll();
+          return;
+        }}
+        const n = Math.max(4, Number(nRaw) || 8);
+        const data = await post('/api/admin/create_class', {{name, n}});
+        setAdminMsg(data.message || data.error || 'Completed', !data.__ok || !!data.error);
+        await poll();
+      }}
+      async function deleteCurrentClass(btn) {{
+        pulseButton(btn);
+        const select = document.getElementById('classSelect');
+        if (!select) return;
+        const currentId = Number(select.value || 0);
+        const currentName = select.options[select.selectedIndex] ? String(select.options[select.selectedIndex].text || '').trim() : `Class ${{currentId}}`;
+        if (!Number.isFinite(currentId) || currentId <= 0) {{
+          setAdminMsg('No valid class selected.', true);
+          return;
+        }}
+        const ok = window.confirm(
+          `Delete current class "${{currentName}}"?\\n\\nThis removes all students, preferences, and matching history for this class.`
+        );
+        if (!ok) return;
+        const data = await post('/api/admin/delete_class', {{class_id: currentId}});
+        setAdminMsg(data.message || data.error || 'Completed', !data.__ok || !!data.error);
+        await poll();
+      }}
+      async function onClassSelectChanged(selectEl) {{
+        const value = String(selectEl.value || '');
         const classId = Number(value);
         if (!Number.isFinite(classId) || classId <= 0) return;
         const data = await post('/api/admin/select_class', {{class_id: classId}});
@@ -2285,6 +2376,14 @@ def render_admin() -> str:
           }}
           return null;
         }}
+        function parseNextRange(msg) {{
+          const m = msg.match(/next\\s*[:=]\\s*\\[\\s*([-]?[0-9]+(?:\\.[0-9]+)?)\\s*,\\s*([-]?[0-9]+(?:\\.[0-9]+)?)\\s*\\]/i);
+          if (!m) return null;
+          const lo = parseNum(m[1]);
+          const hi = parseNum(m[2]);
+          if (lo === null || hi === null) return null;
+          return {{ low: lo, high: hi }};
+        }}
         (logs || []).forEach(line => {{
           const msg = String(line || '').trim();
           if (!msg) return;
@@ -2316,11 +2415,14 @@ def render_admin() -> str:
 
           if (low.startsWith('solver:') && low.includes('#bound')) {{
             const tMatch = msg.match(/([0-9]+(?:\\.[0-9]+)?)\\s*s/i);
-            const boundNum = parseBoundFromSolverLine(msg);
+            const nextRange = parseNextRange(msg);
+            const boundNum = nextRange ? nextRange.high : parseBoundFromSolverLine(msg);
             const gapMatch = msg.match(/gap\\s*[:=]\\s*([-]?[0-9]+(?:\\.[0-9]+)?)/i);
             if (!tMatch) return;
             const parsedGap = gapMatch ? parseNum(gapMatch[1]) : null;
-            const impliedGap = parsedGap !== null ? parsedGap : ((boundNum !== null && lastObjNum !== null) ? Math.abs(boundNum - lastObjNum) : null);
+            const impliedGap = nextRange
+              ? Math.abs(nextRange.high - nextRange.low)
+              : (parsedGap !== null ? parsedGap : ((boundNum !== null && lastObjNum !== null) ? Math.abs(boundNum - lastObjNum) : null));
             if (boundNum === null && impliedGap === null) return;
             rows.push({{
               timeSec: Math.round(Number(tMatch[1])),
@@ -2336,8 +2438,28 @@ def render_admin() -> str:
       }}
       function renderCompactSolverTable(logs) {{
         const rows = compactSolverRows(logs);
-        if (!rows.length) return 'No solver table rows yet.';
-        const fmtTime = (sec) => '[' + String(Math.max(0, Number(sec) || 0)).padStart(7, ' ') + 's]';
+        let completionLine = '';
+        const all = Array.isArray(logs) ? logs : [];
+        for (let i = all.length - 1; i >= 0; i--) {{
+          const msg = String(all[i] || '').trim();
+          if (!msg) continue;
+          const low = msg.toLowerCase();
+          const doneMatch = msg.match(/run completed in\\s*([0-9]+(?:\\.[0-9]+)?)\\s*s/i);
+          if (doneMatch) {{
+            const sec = Math.round(Number(doneMatch[1]));
+            completionLine = `Run completed (${{sec}}s).`;
+            break;
+          }}
+          const statusMatch = msg.match(/solve ended with status\\s*=\\s*([a-z_]+)/i);
+          if (statusMatch) {{
+            completionLine = `Run ended with status ${{statusMatch[1].toUpperCase()}}.`;
+            break;
+          }}
+        }}
+        if (!rows.length) {{
+          return completionLine || 'No solver table rows yet.';
+        }}
+        const fmtTime = (sec) => String(Math.max(0, Number(sec) || 0)).padStart(7, ' ') + 's';
         const widths = {{ time: 10, util: 6, pen: 5, obj: 8, bound: 8, gap: 8 }};
         const pad = (s, w) => String(s ?? '').padStart(w, ' ');
         const sep = '  ';
@@ -2362,6 +2484,10 @@ def render_admin() -> str:
             pad(r.gap, widths.gap)
           );
         }});
+        if (completionLine) {{
+          out.push('');
+          out.push(completionLine);
+        }}
         return out.join('\\n');
       }}
       function renderLogPanels(logs) {{
@@ -2413,7 +2539,23 @@ def render_admin() -> str:
           setUndoVisibility(data);
           setFinalizedControl(!!data.finalized);
           setPackageWarning(data.missing_packages || [], data.latest_error || '');
-          populateClassSelect(data.classes || [], data.class_id);
+          let classes = Array.isArray(data.classes) ? data.classes : [];
+          let classId = data.class_id;
+          if (!classes.length) {{
+            try {{
+              const clsResp = await fetch('/api/admin/classes');
+              if (clsResp.ok) {{
+                const clsData = await clsResp.json();
+                if (Array.isArray(clsData.classes) && clsData.classes.length) {{
+                  classes = clsData.classes;
+                  if (classId === undefined || classId === null) classId = clsData.current_class_id;
+                }}
+              }}
+            }} catch (_err) {{
+              // ignore fallback failure; keep existing select contents
+            }}
+          }}
+          populateClassSelect(classes, classId);
           const classNameInput = document.getElementById('classNameInput');
           if (window.__setClassNameSavedValue) {{
             window.__setClassNameSavedValue(data.class_name || '');
@@ -2969,6 +3111,36 @@ def application(environ, start_response):
         conn.close()
         ensure_students_and_preferences(class_id)
         return json_response(start_response, {"message": "Class created.", "class_id": class_id})
+
+    if method == "POST" and path == "/api/admin/delete_class":
+        with run_state_lock:
+            if run_state["thread"] is not None:
+                return json_response(start_response, {"error": "Cannot delete class while a run is in progress."}, "409 Conflict")
+        data = read_json(environ)
+        requested_class_id = int(data.get("class_id", 0))
+        conn = db_conn()
+        current_class_id = get_current_class_id(conn)
+        class_id = requested_class_id if requested_class_id > 0 else current_class_id
+        exists = conn.execute("SELECT 1 FROM classes WHERE id=?", (class_id,)).fetchone() is not None
+        if not exists:
+            conn.close()
+            return json_response(start_response, {"error": "Class not found."}, "404 Not Found")
+        class_count = int(conn.execute("SELECT COUNT(*) FROM classes").fetchone()[0])
+        if class_count <= 1:
+            conn.close()
+            return json_response(start_response, {"error": "Cannot delete the only remaining class."}, "400 Bad Request")
+        with conn:
+            clear_class_matching_data(conn, class_id)
+            conn.execute("DELETE FROM preferences WHERE class_id=?", (class_id,))
+            conn.execute("DELETE FROM students WHERE class_id=?", (class_id,))
+            conn.execute("DELETE FROM class_meta WHERE class_id=?", (class_id,))
+            conn.execute("DELETE FROM classes WHERE id=?", (class_id,))
+            next_row = conn.execute("SELECT id FROM classes ORDER BY id LIMIT 1").fetchone()
+            next_class_id = int(next_row[0]) if next_row else 1
+            set_current_class_id(conn, next_class_id)
+        conn.close()
+        ensure_students_and_preferences(next_class_id)
+        return json_response(start_response, {"message": "Class deleted.", "class_id": next_class_id})
 
     if method == "POST" and path == "/api/admin/set_class_name":
         data = read_json(environ)
