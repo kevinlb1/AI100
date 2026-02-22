@@ -4,8 +4,15 @@ from ortools.sat.python import cp_model
 import random
 import math
 import csv
-import numpy as np
-import matplotlib.pyplot as plt
+from statistics import median
+try:
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    np = None
+try:
+    import matplotlib.pyplot as plt  # type: ignore
+except Exception:  # pragma: no cover
+    plt = None
 import multiprocessing
 import time
 from typing import List, Tuple, Dict, Any
@@ -30,12 +37,14 @@ def choose_even_k(n: int, M: int) -> Tuple[int, bool]:
 
 def visualize_results(student_ids, main_scores, shadow_scores, n: int):
     """Simple satisfaction chart."""
-    x = np.arange(len(student_ids))
+    if plt is None:
+        return
+    x = list(range(len(student_ids)))
     width = 0.35
 
     fig, ax = plt.subplots(figsize=(14, 6))
-    ax.bar(x - width / 2, main_scores, width, label='Main', color='#27ae60')
-    ax.bar(x + width / 2, shadow_scores, width, label='Shadow', color='#2980b9')
+    ax.bar([xi - width / 2 for xi in x], main_scores, width, label='Main', color='#27ae60')
+    ax.bar([xi + width / 2 for xi in x], shadow_scores, width, label='Shadow', color='#2980b9')
 
     ax.set_ylabel('Preference Score')
     ax.set_title(f'Student Satisfaction (n={n})')
@@ -432,7 +441,7 @@ def solve_lab_ortools(
     # Quick stats
     zeros_per_student = [sum(1 for j in topics if v[i][j] == 0) for i in students]
     print(
-        f"Veto stats: min={min(zeros_per_student)}, median={int(np.median(zeros_per_student))}, max={max(zeros_per_student)} zeros per student"
+        f"Veto stats: min={min(zeros_per_student)}, median={int(median(zeros_per_student))}, max={max(zeros_per_student)} zeros per student"
     )
 
     model = cp_model.CpModel()
@@ -803,17 +812,75 @@ def solve_with_preferences_live(
     solver.parameters.num_search_workers = multiprocessing.cpu_count() if workers is None else int(workers)
     if time_limit_s is not None:
         solver.parameters.max_time_in_seconds = float(time_limit_s)
+    if progress_cb is not None:
+        try:
+            solver.parameters.log_search_progress = True
+            solver.parameters.log_to_stdout = False
+        except Exception:
+            pass
+        try:
+            def _on_solver_log(line: str) -> None:
+                msg = (line or "").strip()
+                if not msg:
+                    return
+                low = msg.lower()
+                if (
+                    "solution" in low
+                    or "objective" in low
+                    or "bound" in low
+                    or "gap" in low
+                    or "status" in low
+                    or "feasible" in low
+                    or "optimal" in low
+                ):
+                    progress_cb(f"solver: {msg}")
+            solver.log_callback = _on_solver_log  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     class LiveProgress(cp_model.CpSolverSolutionCallback):
         def __init__(self):
             super().__init__()
             self.sols = 0
+            self.t0 = time.perf_counter()
+            self.last_obj: float | None = None
 
         def OnSolutionCallback(self):
             self.sols += 1
             util = int(self.Value(utility10_var)) / 10.0
             pen = int(self.Value(penalty_var))
-            msg = f"incumbent {self.sols}: utility={util:.1f}, penalty={pen}, time={self.WallTime():.2f}s"
+            elapsed = time.perf_counter() - self.t0
+
+            try:
+                obj = float(self.ObjectiveValue())
+            except Exception:
+                try:
+                    obj = float(self.objective_value())
+                except Exception:
+                    obj = float("nan")
+
+            try:
+                bound = float(self.BestObjectiveBound())
+            except Exception:
+                try:
+                    bound = float(self.best_objective_bound())
+                except Exception:
+                    bound = float("nan")
+
+            gap = float("nan")
+            if not math.isnan(obj) and not math.isnan(bound):
+                gap = bound - obj
+
+            def fmt_num(x: float) -> str:
+                return "n/a" if math.isnan(x) else str(int(round(x)))
+
+            if self.last_obj is None or (not math.isnan(obj) and obj > self.last_obj + 1e-9):
+                self.last_obj = obj
+            msg = (
+                f"next solution found #{self.sols}: "
+                f"t={elapsed:.2f}s util={util:.1f} pen={pen} "
+                f"obj={fmt_num(obj)} bound={fmt_num(bound)} gap={fmt_num(gap)}"
+            )
             if progress_cb is not None:
                 progress_cb(msg)
             if stop_event is not None and stop_event.is_set():

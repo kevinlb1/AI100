@@ -5,7 +5,7 @@ REM Run from the repository directory where this script lives
 cd /d "%~dp0"
 
 REM Launch browser after a short delay so the server can start first
-start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 1; Start-Process 'http://127.0.0.1:8000'"
+start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 1; Start-Process 'http://127.0.0.1:8000/launch'"
 
 REM Prefer venv Python if present, otherwise fall back to py/python
 if exist ".venv\Scripts\python.exe" (
