@@ -11,7 +11,6 @@ from wsgiref.simple_server import make_server
 
 
 DB_PATH = "match_app.db"
-APP_VERSION = "v2-multiuser"
 
 run_state_lock = threading.Lock()
 run_state = {
@@ -21,6 +20,7 @@ run_state = {
 }
 server_state_lock = threading.Lock()
 server_instance = None
+shutdown_requested = threading.Event()
 
 
 def db_conn() -> sqlite3.Connection:
@@ -114,7 +114,6 @@ def ensure_students_and_preferences() -> None:
                 "INSERT INTO students(id, name, topic_title) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING",
                 (i, f"Student {i + 1}", f"Topic {i + 1}"),
             )
-        conn.execute("DELETE FROM students WHERE id >= ?", (n,))
 
         for i in range(n):
             for j in range(n):
@@ -123,7 +122,6 @@ def ensure_students_and_preferences() -> None:
                     "INSERT INTO preferences(student_id, topic_id, score, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(student_id, topic_id) DO NOTHING",
                     (i, j, default_score, now),
                 )
-        conn.execute("DELETE FROM preferences WHERE student_id >= ? OR topic_id >= ?", (n, n))
 
     conn.close()
 
@@ -148,14 +146,15 @@ def read_json(environ) -> dict:
 
 
 def get_students(conn: sqlite3.Connection) -> list[dict]:
-    return [dict(r) for r in conn.execute("SELECT id, name, topic_title FROM students ORDER BY id").fetchall()]
+    n = int(get_meta(conn, "n", "8"))
+    return [dict(r) for r in conn.execute("SELECT id, name, topic_title FROM students WHERE id < ? ORDER BY id", (n,)).fetchall()]
 
 
 def get_pref_row(conn: sqlite3.Connection, sid: int, n: int) -> list[int]:
-    rows = conn.execute("SELECT topic_id, score FROM preferences WHERE student_id=? ORDER BY topic_id", (sid,)).fetchall()
+    rows = conn.execute("SELECT topic_id, score FROM preferences WHERE student_id=? AND topic_id < ? ORDER BY topic_id", (sid, n)).fetchall()
     if len(rows) != n:
         ensure_students_and_preferences()
-        rows = conn.execute("SELECT topic_id, score FROM preferences WHERE student_id=? ORDER BY topic_id", (sid,)).fetchall()
+        rows = conn.execute("SELECT topic_id, score FROM preferences WHERE student_id=? AND topic_id < ? ORDER BY topic_id", (sid, n)).fetchall()
     return [int(r[1]) for r in rows]
 
 
@@ -176,49 +175,34 @@ def render_home() -> str:
     pref_rows = [(s["id"], get_pref_row(conn, s["id"], n)) for s in students]
     conn.close()
 
-    options = "".join(f"<option value='{s['id']}'>S{s['id'] + 1}: {escape(s['name'])}</option>" for s in students)
+    names_by_id = {s["id"]: s["name"] for s in students}
     latest_html = f"<p>Latest run: #{latest['id']} ({latest['status']})</p>" if latest else "<p>No runs yet.</p>"
     topic_headers = "".join(f"<th>T{s['id'] + 1}<br><span class='muted'>{escape(s['topic_title'])}</span></th>" for s in students)
     matrix_rows = []
-    updated_students = []
     for sid, pref in pref_rows:
         changed = student_has_non_default_preferences(pref, sid)
-        if changed:
-            updated_students.append(f"S{sid + 1}")
-        status_badge = "<span class='status-updated'>updated</span>" if changed else "<span class='status-default'>default</span>"
         cells = "".join(f"<td class='score-cell score-{score}'>{score}</td>" for score in pref)
-        matrix_rows.append(f"<tr><td><strong>S{sid + 1}</strong> {status_badge}</td>{cells}</tr>")
-    updated_html = ", ".join(updated_students) if updated_students else "None"
+        row_class = "matrix-row" if changed else "matrix-row matrix-row-dim"
+        matrix_rows.append(
+            f"<tr class='{row_class}' onclick='window.location.href=\"/student?sid={sid}\"'>"
+            f"<td><strong>S{sid + 1}</strong> <span class='muted'>{escape(names_by_id.get(sid, ''))}</span></td>{cells}</tr>"
+        )
     return f"""
-    <html><head><title>Topic Match ({APP_VERSION})</title><style>{base_css()}</style></head><body>
-    <main class='container'>
-      <h1>Topic Matching Portal ({APP_VERSION})</h1>
-      <p>Finalized: <strong>{'Yes' if finalized else 'No'}</strong></p>
+    <html><head><title>Topic Match</title><style>{base_css()}</style></head><body>
+    <main class='container home-layout'>
+      <h1>Topic Matching Portal</h1>
       {latest_html}
-      <section class='card'>
-        <h2>Overview: Topics & preferences</h2>
-        <p>Students with non-default preferences: <strong>{updated_html}</strong></p>
-        <p class='muted'>Default baseline: own topic = 4, all others = 3.</p>
-        <table>
-          <thead>
-            <tr><th>Student</th>{topic_headers}</tr>
-          </thead>
-          <tbody>
-            {"".join(matrix_rows)}
-          </tbody>
-        </table>
-      </section>
-      <section class='card'>
-        <h2>Student</h2>
-        <form action='/student' method='get'>
-          <select name='sid'>{options}</select>
-          <button type='submit'>Open Student View</button>
-        </form>
-      </section>
-      <section class='card'>
-        <h2>Administrator</h2>
-        <a class='button-link' href='/admin'>Open Admin Dashboard</a>
-      </section>
+      <p><a class='button-link' href='/admin'>Open Admin Dashboard</a></p>
+      <p class='muted'>Click a matrix row to edit that student's preferences.</p>
+      <table>
+        <thead>
+          <tr><th>Student</th>{topic_headers}</tr>
+        </thead>
+        <tbody>
+          {"".join(matrix_rows)}
+        </tbody>
+      </table>
+      <p>Student editing of preferences: <strong>{'Locked' if finalized else 'Unlocked'}</strong></p>
     </main>
     </body></html>
     """
@@ -228,8 +212,12 @@ def base_css() -> str:
     return """
     body { font-family: Arial, sans-serif; background:#f3f6fb; margin:0; }
     .container { max-width:1200px; margin:20px auto; background:white; border-radius:12px; padding:18px; box-shadow:0 2px 9px rgba(0,0,0,.08); }
+    .home-layout { background:transparent; border-radius:0; box-shadow:none; padding:0; }
     .card { border:1px solid #dbe4ef; border-radius:8px; padding:12px; margin:12px 0; }
-    button, .button-link { background:#2563eb; color:white; border:none; border-radius:6px; padding:8px 12px; text-decoration:none; cursor:pointer; transition:transform .08s ease, filter .08s ease; }
+    button, .button-link { background:#2563eb; color:white; border:none; border-radius:6px; padding:8px 12px; text-decoration:none; cursor:pointer; transition:transform .12s ease, filter .12s ease, box-shadow .12s ease; }
+    .button-danger { background:#b91c1c; }
+    button:hover, .button-link:hover, button:focus-visible, .button-link:focus-visible { filter:brightness(1.12); box-shadow:0 0 0 3px rgba(37,99,235,.22), 0 6px 16px rgba(37,99,235,.25); outline:none; }
+    .button-danger:hover, .button-danger:focus-visible { box-shadow:0 0 0 3px rgba(185,28,28,.24), 0 6px 16px rgba(185,28,28,.3); }
     button.pressed { transform:translateY(1px) scale(.98); filter:brightness(.9); }
     .muted { color:#667; }
     .buckets { display:flex; flex-direction:column; gap:10px; }
@@ -237,10 +225,14 @@ def base_css() -> str:
     .bucket h3 { margin:0 0 8px 0; font-size:14px; }
     .bucket-topics { display:flex; flex-wrap:wrap; gap:6px; }
     .topic { background:#dbeafe; border:1px solid #8ab5ff; border-radius:16px; padding:6px 10px; margin-bottom:6px; font-size:12px; cursor:grab; display:inline-flex; align-items:center; gap:5px; }
+    .topic:hover { filter:brightness(1.06); box-shadow:0 0 0 2px rgba(37,99,235,.18), 0 4px 10px rgba(37,99,235,.2); }
     .row { display:flex; gap:14px; flex-wrap:wrap; }
     .col { flex:1; min-width:320px; }
     table { border-collapse:collapse; width:100%; }
     th,td { border:1px solid #ccd7e4; padding:6px; text-align:left; }
+    .matrix-row { cursor:pointer; transition:background-color .12s ease, box-shadow .12s ease; }
+    .matrix-row:hover { background:#e0efff; box-shadow:inset 0 0 0 2px #7fb3ff; }
+    .matrix-row-dim { opacity:.38; }
     .score-cell { text-align:center; font-weight:600; }
     .score-0 { background:#fee2e2; }
     .score-1 { background:#ffedd5; }
@@ -248,8 +240,6 @@ def base_css() -> str:
     .score-3 { background:#e0f2fe; }
     .score-4 { background:#dcfce7; }
     .score-5 { background:#bbf7d0; }
-    .status-updated { color:#1d4ed8; font-weight:700; }
-    .status-default { color:#64748b; font-weight:700; }
     """
 
 
@@ -266,7 +256,7 @@ def render_student(sid: int) -> str:
         assignment = conn.execute("SELECT * FROM assignments WHERE run_id=? AND student_id=?", (latest_id_row[0], sid)).fetchone()
     conn.close()
 
-    topics_json = json.dumps([{"id": s["id"], "short": f"S{s['id'] + 1}", "title": s["topic_title"]} for s in students])
+    topics_json = json.dumps([{"id": s["id"], "short": f"S{s['id'] + 1}", "name": s["name"], "title": s["topic_title"]} for s in students])
     pref_json = json.dumps(pref)
     editable = "false" if finalized else "true"
     assignment_html = ""
@@ -282,23 +272,38 @@ def render_student(sid: int) -> str:
       <p>Editing enabled: <strong>{'Yes' if not finalized else 'No (finalized by admin)'}</strong></p>
       {assignment_html}
       <div class='card'>
-        <h2>Your Topic Title</h2>
+        <h2>Your Info</h2>
+        <label>
+          Student name:
+          <input id='studentNameInput' type='text' value='{escape(students[sid]["name"])}' maxlength='200' style='width:min(520px, 100%); margin-right:8px;'>
+        </label>
+        <span id='nameMsg' class='muted'></span>
+        <br><br>
         <label>
           Topic title:
           <input id='topicTitleInput' type='text' value='{escape(students[sid]["topic_title"])}' maxlength='200' style='width:min(520px, 100%); margin-right:8px;'>
         </label>
-        <button id='saveTitleBtn'>Save title</button>
         <span id='titleMsg' class='muted'></span>
       </div>
       <div id='app'></div>
-      <button id='saveBtn'>Save preferences</button> <span id='msg' class='muted'></span>
+      <p class='muted'>Preferences save automatically.</p>
+      <span id='msg' class='muted'></span>
     </main>
     <script>
       const sid = {sid};
       const editable = {editable};
-      const topics = {topics_json};
+      let topics = {topics_json};
       let scores = {pref_json};
       const vetoMax = Math.floor(topics.length / 4);
+      const prefMsg = document.getElementById('msg');
+      let prefSaveTimer = null;
+      let prefSaveInFlight = false;
+      let prefSaveQueued = false;
+      let lastSavedScores = JSON.stringify(scores);
+
+      function findTopicById(topicId) {{
+        return topics.find(t => t.id === topicId);
+      }}
 
       function render() {{
         const app = document.getElementById('app');
@@ -315,8 +320,8 @@ def render_student(sid: int) -> str:
           const div = document.createElement('div');
           div.className='topic';
           div.draggable = editable;
-          div.title = t.title;
-          div.innerText = `${{t.short}} (${{t.title}})`;
+          div.title = `${{t.short}}: ${{t.name}} | ${{t.title}}`;
+          div.innerText = `${{t.short}}: ${{t.name}} | ${{t.title}}`;
           div.dataset.topicId = String(t.id);
           div.ondragstart = ev => {{
             ev.dataTransfer.effectAllowed = 'move';
@@ -351,28 +356,135 @@ def render_student(sid: int) -> str:
         if (targetScore === 0 && currentVetoes >= vetoMax) return alert('Maximum vetoes reached. Move one out of 0 first.');
         scores[topicId] = targetScore;
         render();
+        schedulePreferenceSave();
       }}
 
-      document.getElementById('saveBtn').onclick = async () => {{
-        const msg = document.getElementById('msg');
-        const res = await fetch(`/api/student/${{sid}}/preferences`, {{
-          method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{scores}})
-        }});
-        const data = await res.json();
-        msg.innerText = data.message || data.error || 'Saved';
-      }};
-      document.getElementById('saveTitleBtn').onclick = async () => {{
+      async function savePreferencesNow(force=false) {{
         if (!editable) return;
-        const title = document.getElementById('topicTitleInput').value.trim();
-        const msg = document.getElementById('titleMsg');
-        const res = await fetch(`/api/student/${{sid}}/topic_title`, {{
-          method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{title}})
+        const serialized = JSON.stringify(scores);
+        if (!force && serialized === lastSavedScores) return;
+        if (prefSaveInFlight) {{
+          prefSaveQueued = true;
+          return;
+        }}
+        prefSaveInFlight = true;
+        prefMsg.innerText = 'Saving...';
+        try {{
+          const res = await fetch(`/api/student/${{sid}}/preferences`, {{
+            method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{scores}})
+          }});
+          const data = await res.json();
+          if (res.ok && !data.error) {{
+            lastSavedScores = serialized;
+          }}
+          prefMsg.innerText = data.message || data.error || (res.ok ? 'Saved' : 'Save failed');
+        }} catch (err) {{
+          prefMsg.innerText = 'Save failed';
+        }} finally {{
+          prefSaveInFlight = false;
+          if (prefSaveQueued) {{
+            prefSaveQueued = false;
+            await savePreferencesNow(true);
+          }}
+        }}
+      }}
+
+      function schedulePreferenceSave() {{
+        if (!editable) return;
+        if (prefSaveTimer) clearTimeout(prefSaveTimer);
+        prefSaveTimer = setTimeout(() => {{
+          prefSaveTimer = null;
+          savePreferencesNow();
+        }}, 350);
+      }}
+
+      function wireAutosaveField(inputId, msgId, endpoint, payloadKey, onLocalValueChange) {{
+        const input = document.getElementById(inputId);
+        const msg = document.getElementById(msgId);
+        let lastSaved = (input.value || '').trim();
+        let timer = null;
+        let inFlight = false;
+
+        async function saveNow() {{
+          if (!editable || inFlight) return;
+          const value = (input.value || '').trim();
+          if (value === lastSaved) return;
+          inFlight = true;
+          msg.innerText = 'Saving...';
+          try {{
+            const res = await fetch(endpoint, {{
+              method:'POST',
+              headers:{{'Content-Type':'application/json'}},
+              body:JSON.stringify({{ [payloadKey]: value }})
+            }});
+            const data = await res.json();
+            if (res.ok && !data.error) {{
+              lastSaved = value;
+            }}
+            msg.innerText = data.message || data.error || (res.ok ? 'Saved' : 'Save failed');
+          }} catch (err) {{
+            msg.innerText = 'Save failed';
+          }} finally {{
+            inFlight = false;
+          }}
+        }}
+
+        input.addEventListener('input', () => {{
+          if (onLocalValueChange) onLocalValueChange(input.value || '');
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(saveNow, 450);
         }});
-        const data = await res.json();
-        msg.innerText = data.message || data.error || 'Saved';
-      }};
+        input.addEventListener('blur', async () => {{
+          if (timer) {{
+            clearTimeout(timer);
+            timer = null;
+          }}
+          await saveNow();
+        }});
+      }}
+
+      wireAutosaveField('studentNameInput', 'nameMsg', `/api/student/${{sid}}/name`, 'name', (value) => {{
+        const own = findTopicById(sid);
+        if (!own) return;
+        own.name = value;
+        render();
+      }});
+      wireAutosaveField('topicTitleInput', 'titleMsg', `/api/student/${{sid}}/topic_title`, 'title', (value) => {{
+        const own = findTopicById(sid);
+        if (!own) return;
+        own.title = value;
+        render();
+      }});
+
+      async function refreshStudentMeta() {{
+        try {{
+          const res = await fetch('/api/students_meta');
+          if (!res.ok) return;
+          const data = await res.json();
+          if (!Array.isArray(data.students)) return;
+          let changed = false;
+          data.students.forEach(s => {{
+            const id = Number(s.id);
+            if (id === sid) return;
+            const t = findTopicById(id);
+            if (!t) return;
+            const nextName = String(s.name ?? '');
+            const nextTitle = String(s.topic_title ?? '');
+            if (t.name !== nextName || t.title !== nextTitle) {{
+              t.name = nextName;
+              t.title = nextTitle;
+              changed = true;
+            }}
+          }});
+          if (changed) render();
+        }} catch (err) {{
+          // keep current values if refresh fails
+        }}
+      }}
+      setInterval(refreshStudentMeta, 2000);
+
       if (!editable) {{
-        document.getElementById('saveTitleBtn').disabled = true;
+        document.getElementById('studentNameInput').disabled = true;
         document.getElementById('topicTitleInput').disabled = true;
       }}
 
@@ -388,11 +500,12 @@ def render_admin() -> str:
     <main class='container'>
       <p><a href='/'>← back</a></p>
       <h1>Admin dashboard</h1>
+      <p><a class='button-link button-danger' href='/shutdown'>Stop server</a></p>
       <div class='row'>
         <div class='col card'>
           <h2>Configuration</h2>
           <label>Number of students/topics: <input id='nInput' type='number' min='4' value='8'></label>
-          <button onclick='setN(this)'>Apply & reset matrix</button>
+          <button onclick='setN(this)'>Apply matrix size</button>
           <button onclick='resetDb(this)'>Reset database</button>
           <label><input id='finalToggle' type='checkbox' onchange='setFinalized()'> Finalize matching (lock student edits)</label>
         </div>
@@ -400,16 +513,15 @@ def render_admin() -> str:
           <h2>Run matching</h2>
           <button onclick='runMatch(this)'>Run matching</button>
           <button onclick='interruptMatch(this)'>Interrupt run</button>
-          <button onclick='stopServer(this)' style='background:#b91c1c;'>Stop server</button>
           <p id='status' class='muted'></p>
           <p id='adminMsg' class='muted'></p>
         </div>
       </div>
-      <section class='card'>
+      <section id='progressSection' class='card' style='display:none;'>
         <h2>Solver progress</h2>
         <pre id='progress' style='background:#0b1220;color:#dbeafe;padding:8px;max-height:240px;overflow:auto;'></pre>
       </section>
-      <section class='card'>
+      <section id='resultsSection' class='card' style='display:none;'>
         <h2>Results</h2>
         <div id='results'></div>
       </section>
@@ -435,6 +547,7 @@ def render_admin() -> str:
         pulseButton(btn);
         const data = await post('/api/admin/set_n', {{n:Number(document.getElementById('nInput').value)}});
         setAdminMsg(data.message || data.error || 'Completed', !data.__ok || !!data.error);
+        await poll();
       }}
       async function resetDb(btn) {{
         pulseButton(btn);
@@ -456,22 +569,12 @@ def render_admin() -> str:
         const data = await post('/api/admin/interrupt');
         setAdminMsg(data.message || data.error || 'Completed', !data.__ok || !!data.error);
       }}
-      async function stopServer(btn) {{
-        pulseButton(btn);
-        const data = await post('/api/admin/stop');
-        setAdminMsg(data.message || data.error || 'Completed', !data.__ok || !!data.error);
-        if (data.__ok && !data.error) {{
-          if (pollHandle) {{
-            clearInterval(pollHandle);
-            pollHandle = null;
-          }}
-          document.getElementById('status').innerText = 'Stopping server...';
-        }}
-      }}
-
       function renderResults(data) {{
         const results = document.getElementById('results');
-        if (!data.latest_run) {{ results.innerHTML = '<p>No completed run yet.</p>'; return; }}
+        if (!data.latest_run || data.latest_run.status === 'running') {{
+          results.innerHTML = '';
+          return false;
+        }}
         const run = data.latest_run;
         let html = `<p>Run #${{run.id}} status: <strong>${{run.status}}</strong>; utility=${{run.utility ?? 'n/a'}}, penalty=${{run.penalty ?? 'n/a'}}, overlap violations=${{run.overlap_count ?? 'n/a'}}</p>`;
 
@@ -492,6 +595,7 @@ def render_admin() -> str:
           html += '<h3>Overlap violations</h3><ul>' + data.overlaps.map(o => `<li>S${{o.s1 + 1}} and S${{o.s2 + 1}}</li>`).join('') + '</ul>';
         }}
         results.innerHTML = html;
+        return true;
       }}
 
       async function poll() {{
@@ -501,8 +605,17 @@ def render_admin() -> str:
           document.getElementById('status').innerText = data.running ? 'Matching in progress...' : 'Idle';
           document.getElementById('finalToggle').checked = data.finalized;
           document.getElementById('nInput').value = data.n;
-          document.getElementById('progress').innerText = data.progress_logs.join('\n');
-          renderResults(data);
+          const progressSection = document.getElementById('progressSection');
+          const progress = document.getElementById('progress');
+          if (data.running) {{
+            progressSection.style.display = 'block';
+            progress.innerText = data.progress_logs.join('\n');
+          }} else {{
+            progressSection.style.display = 'none';
+            progress.innerText = '';
+          }}
+          const hasResults = renderResults(data);
+          document.getElementById('resultsSection').style.display = hasResults ? 'block' : 'none';
         }} catch (err) {{
           document.getElementById('status').innerText = 'Server unavailable';
         }}
@@ -567,6 +680,26 @@ def save_topic_title(sid: int, title: str) -> tuple[bool, str]:
         conn.execute("UPDATE students SET topic_title=? WHERE id=?", (clean[:200], sid))
     conn.close()
     return True, "Topic title saved."
+
+
+def save_student_name(sid: int, name: str) -> tuple[bool, str]:
+    conn = db_conn()
+    n = int(get_meta(conn, "n", "8"))
+    if sid < 0 or sid >= n:
+        conn.close()
+        return False, "Invalid student id."
+    finalized = get_meta(conn, "finalized", "0") == "1"
+    if finalized:
+        conn.close()
+        return False, "Matching finalized; edits are locked."
+    clean = name.strip()
+    if not clean:
+        conn.close()
+        return False, "Student name cannot be empty."
+    with conn:
+        conn.execute("UPDATE students SET name=? WHERE id=?", (clean[:200], sid))
+    conn.close()
+    return True, "Student name saved."
 
 
 def collect_problem(conn: sqlite3.Connection) -> tuple[list[str], list[list[int]]]:
@@ -650,7 +783,7 @@ def run_matching_background(run_id: int, stop_event: threading.Event) -> None:
             run_state["stop_event"] = None
 
 
-def request_server_shutdown() -> bool:
+def request_server_shutdown(delay_s: float = 0.2) -> bool:
     with server_state_lock:
         server = server_instance
     if server is None:
@@ -666,11 +799,8 @@ def request_server_shutdown() -> bool:
     def shutdown_later() -> None:
         if run_thread is not None and run_thread.is_alive():
             run_thread.join(timeout=5)
-        time.sleep(0.2)
-        try:
-            server.shutdown()
-        except Exception:
-            pass
+        time.sleep(delay_s)
+        shutdown_requested.set()
 
     threading.Thread(target=shutdown_later, daemon=True).start()
     return True
@@ -692,6 +822,33 @@ def application(environ, start_response):
     if method == "GET" and path == "/admin":
         return html_response(start_response, render_admin())
 
+    if method == "GET" and path == "/api/students_meta":
+        conn = db_conn()
+        students = get_students(conn)
+        conn.close()
+        return json_response(start_response, {"students": students})
+
+    if method == "GET" and path == "/stopped":
+        return html_response(
+            start_response,
+            """
+            <html><head><title>Server stopped</title><style>body{font-family:Arial,sans-serif;background:#f3f6fb;margin:0;padding:24px;} .box{max-width:780px;margin:40px auto;background:#fff;border-radius:10px;padding:24px;box-shadow:0 2px 9px rgba(0,0,0,.08);} h1{margin-top:0;}</style></head>
+            <body><div class='box'><h1>Server has stopped.</h1><p>This app is no longer running. Restart the server to use it again.</p></div></body></html>
+            """,
+        )
+
+    if method == "GET" and path == "/shutdown":
+        ok = request_server_shutdown(0.8)
+        if not ok:
+            return html_response(start_response, "<html><body><h1>Server is not running.</h1></body></html>", "503 Service Unavailable")
+        return html_response(
+            start_response,
+            """
+            <html><head><title>Server stopped</title><style>body{font-family:Arial,sans-serif;background:#f3f6fb;margin:0;padding:24px;} .box{max-width:780px;margin:40px auto;background:#fff;border-radius:10px;padding:24px;box-shadow:0 2px 9px rgba(0,0,0,.08);} h1{margin-top:0;}</style></head>
+            <body><div class='box'><h1>Server has stopped.</h1><p>This app is no longer running. Restart the server to use it again.</p></div></body></html>
+            """,
+        )
+
     if method == "POST" and path.startswith("/api/student/") and path.endswith("/preferences"):
         sid = int(path.split("/")[3])
         data = read_json(environ)
@@ -704,18 +861,29 @@ def application(environ, start_response):
         ok, msg = save_topic_title(sid, str(data.get("title", "")))
         return json_response(start_response, {"message": msg} if ok else {"error": msg}, "200 OK" if ok else "400 Bad Request")
 
+    if method == "POST" and path.startswith("/api/student/") and path.endswith("/name"):
+        sid = int(path.split("/")[3])
+        data = read_json(environ)
+        ok, msg = save_student_name(sid, str(data.get("name", "")))
+        return json_response(start_response, {"message": msg} if ok else {"error": msg}, "200 OK" if ok else "400 Bad Request")
+
     if method == "POST" and path == "/api/admin/set_n":
         data = read_json(environ)
         n = int(data.get("n", 8))
         n = max(4, n)
         conn = db_conn()
+        prev_n = int(get_meta(conn, "n", "8"))
         with conn:
             set_meta(conn, "n", str(n))
-            conn.execute("DELETE FROM students")
-            conn.execute("DELETE FROM preferences")
         conn.close()
         ensure_students_and_preferences()
-        return json_response(start_response, {"message": f"Reset to n={n}."})
+        if n == prev_n:
+            msg = f"Matrix size unchanged (n={n}). Existing preferences were kept."
+        elif n > prev_n:
+            msg = f"Matrix expanded from n={prev_n} to n={n}. Existing preferences were kept; new rows/columns use defaults."
+        else:
+            msg = f"Matrix reduced from n={prev_n} to n={n}. Existing preferences for remaining students were kept."
+        return json_response(start_response, {"message": msg})
 
     if method == "POST" and path == "/api/admin/reset":
         conn = db_conn()
@@ -772,10 +940,10 @@ def application(environ, start_response):
         return json_response(start_response, {"message": "Interrupt requested."})
 
     if method == "POST" and path == "/api/admin/stop":
-        ok = request_server_shutdown()
+        ok = request_server_shutdown(1.5)
         if not ok:
             return json_response(start_response, {"error": "Server is not running."}, "503 Service Unavailable")
-        return json_response(start_response, {"message": "Server shutdown requested."})
+        return json_response(start_response, {"message": "Server shutdown requested.", "redirect": "/stopped"})
 
     if method == "GET" and path == "/api/admin/status":
         conn = db_conn()
@@ -816,12 +984,15 @@ def application(environ, start_response):
 
 if __name__ == "__main__":
     initialize_db()
+    shutdown_requested.clear()
     with make_server("0.0.0.0", 8000, application) as server:
         with server_state_lock:
             server_instance = server
         try:
             print("Serving on http://0.0.0.0:8000")
-            server.serve_forever()
+            server.timeout = 0.5
+            while not shutdown_requested.is_set():
+                server.handle_request()
         finally:
             with server_state_lock:
                 server_instance = None
