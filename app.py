@@ -14,6 +14,12 @@ from html import escape
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from wsgiref.simple_server import make_server
+from generate import (
+    generate_preferences_by_category,
+    generate_preferences_by_category_mode3,
+    generate_preferences_by_category_uniform_real_binned,
+    generate_preferences_random,
+)
 
 
 DB_PATH = "match_app.db"
@@ -464,133 +470,6 @@ def clear_class_matching_data(conn: sqlite3.Connection, class_id: int) -> None:
     conn.execute("DELETE FROM match_runs WHERE class_id=?", (class_id,))
 
 
-def apply_fixed_vetoes_least_preferred_local(v: list[list[int]], seed: int) -> None:
-    n = len(v)
-    veto_count = n // 4
-    if n >= 2 and veto_count > n - 2:
-        veto_count = n - 2
-    for i in range(n):
-        rng = random.Random((seed + 1) * 1_000_003 + (i + 11) * 97_331)
-        candidates = [j for j in range(n) if j != i]
-        rng.shuffle(candidates)
-        candidates.sort(key=lambda j: v[i][j])
-        for j in candidates[:veto_count]:
-            v[i][j] = 0
-        v[i][i] = 5
-
-
-def generate_harness_preferences_local(n: int, mode: str, seed: int, category_count: int) -> tuple[list[list[int]], list[int]]:
-    if n <= 0:
-        raise ValueError("n must be positive.")
-    C = max(1, int(category_count))
-    rng = random.Random(seed)
-    topics = range(n)
-
-    if mode == "random":
-        v = []
-        for i in range(n):
-            row = [rng.randint(1, 5) for _ in topics]
-            row[i] = 5
-            v.append(row)
-        cat = [j % C for j in topics]
-        apply_fixed_vetoes_least_preferred_local(v, seed)
-        return v, cat
-
-    if mode == "category":
-        base: list[list[int]] = []
-        fav_cat: list[int] = []
-        for _ in range(n):
-            fav = rng.randrange(C)
-            fav_cat.append(fav)
-            row = []
-            for c in range(C):
-                row.append(5 if c == fav else rng.randint(1, 4))
-            base.append(row)
-        cat = [fav_cat[j] for j in topics]
-        v = []
-        for i in range(n):
-            row = []
-            for j in topics:
-                score = base[i][cat[j]] + rng.choice([-1, 0, 1])
-                row.append(max(1, min(5, score)))
-            row[i] = 5
-            v.append(row)
-        apply_fixed_vetoes_least_preferred_local(v, seed)
-        return v, cat
-
-    if mode == "category_mode3":
-        def weighted_choice(values: list[int], weights: list[int]) -> int:
-            total = sum(weights)
-            x = rng.randrange(total)
-            acc = 0
-            for value, w in zip(values, weights):
-                acc += w
-                if x < acc:
-                    return value
-            return values[-1]
-
-        pref_vals = [1, 2, 3, 4, 5]
-        pref_wts = [1, 4, 10, 4, 1]
-        base = [[weighted_choice(pref_vals, pref_wts) for _ in range(C)] for _ in range(n)]
-        cat = []
-        for j in topics:
-            best = max(base[j])
-            best_cats = [c for c in range(C) if base[j][c] == best]
-            cat.append(rng.choice(best_cats))
-        noise_vals = [-1, 0, 1]
-        noise_wts = [1, 4, 1]
-        v = []
-        for i in range(n):
-            row = []
-            for j in topics:
-                noise = weighted_choice(noise_vals, noise_wts)
-                score = base[i][cat[j]] + noise
-                row.append(max(1, min(5, score)))
-            row[i] = 5
-            v.append(row)
-        apply_fixed_vetoes_least_preferred_local(v, seed)
-        return v, cat
-
-    if mode == "category_uniform":
-        # Real-valued category preferences U[1,5], per-topic modifier U[-1,1].
-        # Own proposal category is set to 4.5 before modifiers.
-        base_real: list[list[float]] = [[rng.uniform(1.0, 5.0) for _ in range(C)] for _ in range(n)]
-        cat: list[int] = []
-        for j in topics:
-            best = max(base_real[j])
-            best_cats = [c for c in range(C) if abs(base_real[j][c] - best) <= 1e-12]
-            cat.append(rng.choice(best_cats))
-
-        real_scores: list[list[float]] = []
-        for i in range(n):
-            own_cat = cat[i]
-            base_i = list(base_real[i])
-            base_i[own_cat] = 4.5
-            row = []
-            for j in topics:
-                mod = rng.uniform(-1.0, 1.0)
-                row.append(base_i[cat[j]] + mod)
-            real_scores.append(row)
-
-        v: list[list[int]] = []
-        veto_count = n // 4
-        for i in range(n):
-            order_asc = sorted(range(n), key=lambda j: (real_scores[i][j], rng.random()))
-            veto = set(order_asc[:veto_count])
-            remaining = [j for j in range(n) if j not in veto]
-            order_desc = sorted(remaining, key=lambda j: (real_scores[i][j], rng.random()), reverse=True)
-            m = len(order_desc)
-            row = [0] * n
-            if m > 0:
-                for rank_idx, j in enumerate(order_desc):
-                    bucket = int((rank_idx * 5) / m)  # 0..4
-                    row[j] = 5 - bucket
-            v.append(row)
-        return v, cat
-
-    raise ValueError('mode must be one of: "category_uniform", "category", "category_mode3", "random"')
-
-
 def sample_unique_labels(pool: list[str], n: int, seed: int, kind: str) -> list[str]:
     if n > len(pool):
         raise ValueError(f"Cannot sample {n} unique {kind}; list has {len(pool)} entries.")
@@ -609,7 +488,14 @@ def randomize_class_data(conn: sqlite3.Connection, class_id: int, mode: str, see
     category_count = max(1, min(len(AI_CATEGORIES_10), n))
     try:
         names = sample_unique_labels(COMMON_NAMES_100, n, seed ^ 0x4C1B3A77, "student names")
-        pref, cat = generate_harness_preferences_local(n, mode, seed, category_count)
+        if mode == "random":
+            pref, _r, _base, cat = generate_preferences_random(n=n, C=category_count, seed=seed)
+        elif mode == "category":
+            pref, _r, _base, cat = generate_preferences_by_category(n=n, C=category_count, seed=seed)
+        elif mode == "category_mode3":
+            pref, _r, _base, cat = generate_preferences_by_category_mode3(n=n, C=category_count, seed=seed)
+        else:
+            pref, _r, _base, cat = generate_preferences_by_category_uniform_real_binned(n=n, C=category_count, seed=seed)
         if mode == "random":
             topics = sample_unique_labels(AI_TOPICS_FLAT, n, seed ^ 0x9E3779B1, "topic titles")
         else:
@@ -3275,3 +3161,4 @@ if __name__ == "__main__":
         finally:
             with server_state_lock:
                 server_instance = None
+
