@@ -635,7 +635,7 @@ def randomize_class_data(conn: sqlite3.Connection, class_id: int, mode: str, see
                     pos = 0
                 topic_name = order[pos]
                 per_cat_pos[cname] = pos + 1
-                topics.append(f"{cname} : {topic_name}")
+                topics.append(f"{cname}: {topic_name}")
     except ValueError as exc:
         return False, str(exc)
 
@@ -861,7 +861,15 @@ def render_home() -> str:
     if latest_group_run_id is not None:
         selected_topic_ids_ordered = [
             int(r[0])
-            for r in conn.execute("SELECT topic_id FROM selected_topics WHERE run_id=? ORDER BY topic_id", (latest_group_run_id,)).fetchall()
+            for r in conn.execute(
+                """
+                SELECT topic_id
+                FROM selected_topics
+                WHERE run_id=?
+                ORDER BY CASE partition WHEN 'A' THEN 0 WHEN 'B' THEN 1 ELSE 2 END, topic_id
+                """,
+                (latest_group_run_id,),
+            ).fetchall()
             if 0 <= int(r[0]) < n
         ]
         selected_topic_ids = set(selected_topic_ids_ordered)
@@ -904,9 +912,9 @@ def render_home() -> str:
     fallback_topic_num_within_category: dict[str, int] = {}
     for tid in range(n):
         title = str(topic_titles_by_id.get(tid, ""))
-        if " : " not in title:
+        if ":" not in title:
             continue
-        category_name, topic_name = title.split(" : ", 1)
+        category_name, topic_name = title.split(":", 1)
         category_name = category_name.strip()
         topic_name = topic_name.strip()
         cnum = category_index.get(category_name)
@@ -960,19 +968,27 @@ def render_home() -> str:
             col_class += " group-head"
             group_tag_html = f"<div class='topic-group' style='color:{color};'>G{gid + 1}</div>"
             header_style = f" style='background:{hex_to_rgba(color, 0.12)};'"
+        elif has_selected_columns:
+            col_class += " unmatched-topic-col"
+        short_code = escape(short_topic_code_by_id.get(tid, f"T{tid + 1}"))
         topic_label_html = (
-            f"<div class='topic-code'>{escape(short_topic_code_by_id.get(tid, f'T{tid + 1}'))}</div>"
-            if dense_mode
-            else f"<div class='topic-code topic-code-full'>{escape(topic_title)}</div>"
+            f"<div class='topic-code topic-code-short'>{short_code}</div>"
+            f"<div class='topic-code topic-code-full'>{escape(topic_title)}</div>"
         )
         topic_headers.append(
             f"<th class='{col_class}' title='{escape(topic_title)}'{header_style}>"
-            f"{group_tag_html}"
             f"{topic_label_html}"
             f"<div class='topic-title'>{escape(topic_title)}</div>"
+            f"{group_tag_html}"
             f"</th>"
         )
-    colgroup = "<col class='student-col'>" + "".join("<col class='topic-col'>" for _ in ordered_topic_ids)
+    topic_col_defs = []
+    for tid in ordered_topic_ids:
+        col_cls = "topic-col"
+        if has_selected_columns and tid not in selected_topic_ids:
+            col_cls += " unmatched-topic-col"
+        topic_col_defs.append(f"<col class='{col_cls}'>")
+    colgroup = "<col class='student-col'>" + "".join(topic_col_defs)
 
     def row_sort_key(row: tuple[int, list[int]]) -> tuple[int, int, int]:
         sid = int(row[0])
@@ -1035,6 +1051,8 @@ def render_home() -> str:
         for tid in ordered_topic_ids:
             score = pref[tid]
             cell_class = f"score-cell score-{score}"
+            if has_selected_columns and tid not in selected_topic_ids:
+                cell_class += " unmatched-topic-cell"
             cell_style = ""
             score_html = str(score)
             if has_selected_columns:
@@ -1079,19 +1097,104 @@ def render_home() -> str:
         <a class='button-link' href='/admin'>Open Admin Dashboard</a>
         <a class='button-link button-danger' href='/shutdown'>Stop server</a>
       </div>
-      <table class='matrix-table'>
-        <colgroup>{colgroup}</colgroup>
-        <thead>
-          <tr><th class='student-head'>Student</th>{''.join(topic_headers)}</tr>
-        </thead>
-        <tbody>
-          {"".join(matrix_rows)}
-        </tbody>
-      </table>
+      <div class='matrix-controls'>
+        <button id='topicTitleToggleBtn' type='button'>Expand topic titles</button>
+        <button id='matrixFlowToggleBtn' type='button'>Fit/Scroll: Fit</button>
+        <button id='unmatchedToggleBtn' type='button'>Hide unmatched topics</button>
+      </div>
+      <div id='matrixWrap' class='matrix-wrap matrix-fit table-mode-compressed'>
+        <table class='matrix-table'>
+          <colgroup>{colgroup}</colgroup>
+          <thead>
+            <tr><th class='student-head'>Student</th>{''.join(topic_headers)}</tr>
+          </thead>
+          <tbody>
+            {"".join(matrix_rows)}
+          </tbody>
+        </table>
+      </div>
       {latest_html}
     </main>
     <script>
       const homeFingerprint = {json.dumps(home_fingerprint)};
+      const hasMatchedColumns = {str(has_selected_columns).lower()};
+      const uiStateStorageKey = 'topic_match_home_ui_state_v1';
+      let topicTitleExpanded = false;
+      let matrixFlowMode = 'fit'; // fit | scroll
+      let hideUnmatchedTopics = false;
+      function loadUiState() {{
+        try {{
+          const raw = window.localStorage.getItem(uiStateStorageKey);
+          if (!raw) return null;
+          const parsed = JSON.parse(raw);
+          if (!parsed || typeof parsed !== 'object') return null;
+          return parsed;
+        }} catch (_err) {{
+          return null;
+        }}
+      }}
+      function saveUiState() {{
+        try {{
+          const state = {{
+            topicTitleExpanded: !!topicTitleExpanded,
+            matrixFlowMode: matrixFlowMode === 'scroll' ? 'scroll' : 'fit',
+            hideUnmatchedTopics: !!hideUnmatchedTopics,
+          }};
+          window.localStorage.setItem(uiStateStorageKey, JSON.stringify(state));
+        }} catch (_err) {{
+          // ignore storage errors
+        }}
+      }}
+      function setTopicTitleExpanded(expanded) {{
+        const wrap = document.getElementById('matrixWrap');
+        const btn = document.getElementById('topicTitleToggleBtn');
+        if (!wrap || !btn) return;
+        topicTitleExpanded = !!expanded;
+        wrap.classList.remove('table-mode-compressed', 'table-mode-all');
+        wrap.classList.add(topicTitleExpanded ? 'table-mode-all' : 'table-mode-compressed');
+        if (topicTitleExpanded) {{
+          btn.innerText = 'Compress topic titles';
+        }} else {{
+          btn.innerText = 'Expand topic titles';
+        }}
+        saveUiState();
+      }}
+      function toggleTopicTitleMode() {{
+        setTopicTitleExpanded(!topicTitleExpanded);
+      }}
+      function setMatrixFlowMode(mode) {{
+        const wrap = document.getElementById('matrixWrap');
+        const btn = document.getElementById('matrixFlowToggleBtn');
+        if (!wrap || !btn) return;
+        if (mode !== 'fit' && mode !== 'scroll') mode = 'fit';
+        matrixFlowMode = mode;
+        const effectiveMode = hideUnmatchedTopics ? 'fit' : matrixFlowMode;
+        wrap.classList.remove('matrix-fit', 'matrix-scroll');
+        wrap.classList.add('matrix-' + effectiveMode);
+        btn.innerText = 'Fit/Scroll: ' + (effectiveMode === 'fit' ? 'Fit' : 'Scroll');
+        btn.title = (hideUnmatchedTopics && matrixFlowMode === 'scroll') ? 'Unmatched topics hidden: forced to fit mode.' : '';
+        saveUiState();
+      }}
+      function toggleMatrixFlowMode() {{
+        setMatrixFlowMode(matrixFlowMode === 'fit' ? 'scroll' : 'fit');
+      }}
+      function setHideUnmatched(hidden) {{
+        const wrap = document.getElementById('matrixWrap');
+        const btn = document.getElementById('unmatchedToggleBtn');
+        hideUnmatchedTopics = !!hidden;
+        if (wrap) {{
+          wrap.classList.toggle('hide-unmatched', hideUnmatchedTopics);
+        }}
+        if (btn) {{
+          btn.innerText = hideUnmatchedTopics ? 'Show unmatched topics' : 'Hide unmatched topics';
+        }}
+        setMatrixFlowMode(matrixFlowMode);
+        saveUiState();
+      }}
+      function toggleHideUnmatched() {{
+        if (!hasMatchedColumns) return;
+        setHideUnmatched(!hideUnmatchedTopics);
+      }}
       async function refreshLockStatus() {{
         try {{
           const r = await fetch('/api/finalized');
@@ -1114,6 +1217,32 @@ def render_home() -> str:
           // ignore transient poll errors
         }}
       }}
+      const topicTitleToggleBtn = document.getElementById('topicTitleToggleBtn');
+      if (topicTitleToggleBtn) {{
+        topicTitleToggleBtn.addEventListener('click', toggleTopicTitleMode);
+      }}
+      const matrixFlowToggleBtn = document.getElementById('matrixFlowToggleBtn');
+      if (matrixFlowToggleBtn) {{
+        matrixFlowToggleBtn.addEventListener('click', toggleMatrixFlowMode);
+      }}
+      const unmatchedToggleBtn = document.getElementById('unmatchedToggleBtn');
+      if (unmatchedToggleBtn) {{
+        if (!hasMatchedColumns) {{
+          unmatchedToggleBtn.disabled = true;
+          unmatchedToggleBtn.style.opacity = '0.6';
+          unmatchedToggleBtn.style.cursor = 'default';
+          unmatchedToggleBtn.title = 'No matched topics to filter.';
+        }} else {{
+          unmatchedToggleBtn.addEventListener('click', toggleHideUnmatched);
+        }}
+      }}
+      const savedUiState = loadUiState();
+      const initialExpand = !!(savedUiState && savedUiState.topicTitleExpanded);
+      const initialFlow = (savedUiState && savedUiState.matrixFlowMode === 'scroll') ? 'scroll' : 'fit';
+      const initialHideUnmatched = !!(savedUiState && savedUiState.hideUnmatchedTopics && hasMatchedColumns);
+      setTopicTitleExpanded(initialExpand);
+      setMatrixFlowMode(initialFlow);
+      setHideUnmatched(initialHideUnmatched);
       setInterval(refreshLockStatus, 2000);
       setInterval(refreshHomeIfChanged, 2000);
     </script>
@@ -1266,6 +1395,50 @@ def base_css() -> str:
     .matrix-table .topic-code { font-weight:700; line-height:1.05; }
     .matrix-table .topic-code-full { font-size:10px; font-weight:600; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .matrix-table .topic-title { display:none; }
+    .matrix-controls { display:flex; justify-content:flex-end; gap:8px; margin:6px 0 8px 0; }
+    .matrix-wrap { width:100%; overflow-x:hidden; }
+    .matrix-wrap.matrix-scroll { overflow-x:auto; }
+    .matrix-wrap.matrix-fit { overflow-x:hidden; }
+    .matrix-wrap.table-mode-compressed .topic-code-short { display:block; }
+    .matrix-wrap.table-mode-compressed .topic-code-full { display:none; }
+    .matrix-wrap.table-mode-all .topic-code-short { display:none; }
+    .matrix-wrap.table-mode-all .topic-code-full { display:block; }
+    .matrix-wrap.hide-unmatched .unmatched-topic-col,
+    .matrix-wrap.hide-unmatched .unmatched-topic-cell { display:none; }
+    .matrix-wrap.matrix-scroll .matrix-table {
+      table-layout:auto;
+      width:max-content;
+      min-width:100%;
+    }
+    .matrix-wrap.matrix-fit .matrix-table {
+      table-layout:fixed;
+      width:100%;
+      min-width:0;
+    }
+    .matrix-wrap.matrix-fit .topic-head,
+    .matrix-wrap.hide-unmatched .topic-head {
+      white-space:normal;
+      overflow:visible;
+      text-overflow:clip;
+      overflow-wrap:anywhere;
+      word-break:break-word;
+    }
+    .matrix-wrap.matrix-fit .topic-code-full,
+    .matrix-wrap.hide-unmatched .topic-code-full {
+      white-space:normal;
+      overflow:visible;
+      text-overflow:clip;
+      overflow-wrap:anywhere;
+      word-break:break-word;
+    }
+    .matrix-wrap.hide-unmatched {
+      overflow-x:hidden;
+    }
+    .matrix-wrap.hide-unmatched .matrix-table {
+      table-layout:fixed;
+      width:100%;
+      min-width:0;
+    }
     .matrix-table .score-cell { text-align:center; font-weight:600; font-size:11px; padding:4px 1px; }
     .shadow-pref-circle {
       display:inline-flex;
@@ -1345,7 +1518,16 @@ def render_student(sid: int) -> str:
         assignment = conn.execute("SELECT * FROM assignments WHERE run_id=? AND student_id=?", (run_id, sid)).fetchone()
         if assignment:
             selected_topic_ids_ordered = [
-                int(r[0]) for r in conn.execute("SELECT topic_id FROM selected_topics WHERE run_id=? ORDER BY topic_id", (run_id,)).fetchall()
+                int(r[0])
+                for r in conn.execute(
+                    """
+                    SELECT topic_id
+                    FROM selected_topics
+                    WHERE run_id=?
+                    ORDER BY CASE partition WHEN 'A' THEN 0 WHEN 'B' THEN 1 ELSE 2 END, topic_id
+                    """,
+                    (run_id,),
+                ).fetchall()
             ]
             group_rank = {tid: idx for idx, tid in enumerate(selected_topic_ids_ordered)}
             group_palette = [
@@ -1380,7 +1562,7 @@ def render_student(sid: int) -> str:
     <main class='container'>
       <p><a href='/'>← back</a></p>
       <h1>Student {sid + 1} preferences</h1>
-      <p class='muted'>Drag topics between score buckets (0..5). Max vetoes (score 0): floor(n/4).</p>
+      <p class='muted'>Drag topics to change their rankings. At most {n // 4} topics can be given score zero, which corresponds to a veto.</p>
       <p>Editing enabled: <strong id='editingState'>{'Yes' if not finalized else 'No (finalized by admin)'}</strong></p>
       {assignment_html}
       <div class='card'>
@@ -1714,7 +1896,10 @@ def render_admin() -> str:
         </span>
       </p>
       <section id='progressSection' class='card' style='display:none;'>
-        <h2>Solver progress</h2>
+        <h2 style='display:flex;align-items:center;justify-content:space-between;gap:10px;'>
+          <span>Solver progress</span>
+          <button id='autoFollowBtn' type='button' onclick='toggleAutoFollow(this)'>Auto-follow: On</button>
+        </h2>
         <div id='progress'></div>
       </section>
       <section id='resultsSection' class='card' style='display:none;'>
@@ -2053,14 +2238,58 @@ def render_admin() -> str:
           .replaceAll('<', '&lt;')
           .replaceAll('>', '&gt;');
       }}
+      let fullLogOpen = false;
+      let autoFollowProgress = true;
+      let lastProgressSignature = '';
+      function refreshAutoFollowBtn() {{
+        const btn = document.getElementById('autoFollowBtn');
+        if (!btn) return;
+        btn.innerText = autoFollowProgress ? 'Auto-follow: On' : 'Auto-follow: Off';
+      }}
+      function toggleAutoFollow(btn) {{
+        pulseButton(btn);
+        autoFollowProgress = !autoFollowProgress;
+        refreshAutoFollowBtn();
+      }}
+      function bindFullLogState(rootEl) {{
+        if (!rootEl) return;
+        const details = rootEl.querySelector('.full-log-details');
+        if (!details) return;
+        details.open = !!fullLogOpen;
+        details.addEventListener('toggle', () => {{
+          fullLogOpen = !!details.open;
+        }});
+      }}
       function compactSolverRows(logs) {{
         const rows = [];
+        let lastObjNum = null;
+        function parseNum(raw) {{
+          const v = Number(raw);
+          return Number.isFinite(v) ? v : null;
+        }}
+        function formatRounded(n) {{
+          return n === null ? '' : String(Math.round(n));
+        }}
+        function parseBoundFromSolverLine(msg) {{
+          const patterns = [
+            /bound\\s*[:=]\\s*([-]?[0-9]+(?:\\.[0-9]+)?)/i,
+            /best_bound\\s*[:=]\\s*([-]?[0-9]+(?:\\.[0-9]+)?)/i,
+            /next\\s*[:=]\\s*\\[\\s*([-]?[0-9]+(?:\\.[0-9]+)?)/i,
+            /next\\s*[:=]\\s*([-]?[0-9]+(?:\\.[0-9]+)?)/i,
+          ];
+          for (const p of patterns) {{
+            const m = msg.match(p);
+            if (!m) continue;
+            const n = parseNum(m[1]);
+            if (n !== null) return n;
+          }}
+          return null;
+        }}
         (logs || []).forEach(line => {{
           const msg = String(line || '').trim();
           if (!msg) return;
           const low = msg.toLowerCase();
 
-          // Solution incumbents emitted by LiveProgress callback.
           if (low.startsWith('next solution found')) {{
             const tMatch = msg.match(/t\\s*=\\s*([0-9]+(?:\\.[0-9]+)?)\\s*s/i);
             const utilMatch = msg.match(/util\\s*=\\s*([0-9]+(?:\\.[0-9]+)?)/i);
@@ -2069,32 +2298,37 @@ def render_admin() -> str:
             const boundMatch = msg.match(/bound\\s*=\\s*([-]?[0-9]+(?:\\.[0-9]+)?)/i);
             const gapMatch = msg.match(/gap\\s*=\\s*([-]?[0-9]+(?:\\.[0-9]+)?)/i);
             if (!tMatch) return;
+            const objNum = objMatch ? parseNum(objMatch[1]) : null;
+            if (objNum !== null) lastObjNum = objNum;
+            const boundNum = boundMatch ? parseNum(boundMatch[1]) : null;
+            const parsedGap = gapMatch ? parseNum(gapMatch[1]) : null;
+            const impliedGap = parsedGap !== null ? parsedGap : ((boundNum !== null && objNum !== null) ? Math.abs(boundNum - objNum) : null);
             rows.push({{
               timeSec: Math.round(Number(tMatch[1])),
-              util: utilMatch ? String(utilMatch[1]) : '',
+              util: utilMatch ? String(Math.round(Number(utilMatch[1]))) : '',
               pen: penMatch ? String(penMatch[1]) : '',
-              obj: objMatch ? String(Math.round(Number(objMatch[1]))) : '',
-              bound: boundMatch ? String(Math.round(Number(boundMatch[1]))) : '',
-              gap: gapMatch ? String(Math.round(Number(gapMatch[1]))) : '',
+              obj: formatRounded(objNum),
+              bound: formatRounded(boundNum),
+              gap: formatRounded(impliedGap),
             }});
             return;
           }}
 
-          // CP-SAT bound lines (e.g., "solver: #Bound ...").
           if (low.startsWith('solver:') && low.includes('#bound')) {{
             const tMatch = msg.match(/([0-9]+(?:\\.[0-9]+)?)\\s*s/i);
-            const boundMatch =
-              msg.match(/bound\\s*[:=]\\s*([-]?[0-9]+(?:\\.[0-9]+)?)/i) ||
-              msg.match(/best_bound\\s*[:=]\\s*([-]?[0-9]+(?:\\.[0-9]+)?)/i);
+            const boundNum = parseBoundFromSolverLine(msg);
             const gapMatch = msg.match(/gap\\s*[:=]\\s*([-]?[0-9]+(?:\\.[0-9]+)?)/i);
             if (!tMatch) return;
+            const parsedGap = gapMatch ? parseNum(gapMatch[1]) : null;
+            const impliedGap = parsedGap !== null ? parsedGap : ((boundNum !== null && lastObjNum !== null) ? Math.abs(boundNum - lastObjNum) : null);
+            if (boundNum === null && impliedGap === null) return;
             rows.push({{
               timeSec: Math.round(Number(tMatch[1])),
               util: '',
               pen: '',
               obj: '',
-              bound: boundMatch ? String(Math.round(Number(boundMatch[1]))) : '',
-              gap: gapMatch ? String(Math.round(Number(gapMatch[1]))) : '',
+              bound: formatRounded(boundNum),
+              gap: formatRounded(impliedGap),
             }});
           }}
         }});
@@ -2135,7 +2369,7 @@ def render_admin() -> str:
         const fullText = escHtml((logs || []).join('\\n'));
         return (
           `<pre style="background:#0b1220;color:#dbeafe;padding:8px;white-space:pre-wrap;word-break:break-word;overflow:visible;">${{compactText}}</pre>` +
-          `<details><summary>Full log</summary>` +
+          `<details class="full-log-details"${{fullLogOpen ? ' open' : ''}}><summary>Full log</summary>` +
           `<pre style="background:#0b1220;color:#dbeafe;padding:8px;white-space:pre-wrap;word-break:break-word;overflow:visible;">${{fullText}}</pre>` +
           `</details>`
         );
@@ -2160,6 +2394,7 @@ def render_admin() -> str:
           html += renderLogPanels(data.progress_logs);
         }}
         results.innerHTML = html;
+        bindFullLogState(results);
         return true;
       }}
 
@@ -2191,11 +2426,22 @@ def render_admin() -> str:
             nextMs = 250;
             progressSection.style.display = 'block';
             const logs = data.progress_logs.length ? data.progress_logs : ['Starting run...'];
-            progress.innerHTML = renderLogPanels(logs);
+            const signature = String(logs.length) + '|' + String(logs[logs.length - 1] || '');
+            if (signature !== lastProgressSignature) {{
+              progress.innerHTML = renderLogPanels(logs);
+              bindFullLogState(progress);
+              lastProgressSignature = signature;
+              if (autoFollowProgress) {{
+                window.scrollTo({{ top: document.body.scrollHeight, behavior: 'smooth' }});
+              }}
+            }} else {{
+              bindFullLogState(progress);
+            }}
           }} else {{
             nextMs = 1200;
             progressSection.style.display = 'none';
             progress.innerHTML = '';
+            lastProgressSignature = '';
           }}
           const hasResults = renderResults(data);
           document.getElementById('resultsSection').style.display = hasResults ? 'block' : 'none';
@@ -2212,6 +2458,7 @@ def render_admin() -> str:
       }});
       wireClassNameAutosave();
       initThemeMode();
+      refreshAutoFollowBtn();
       poll();
     </script>
     </body></html>
@@ -2317,6 +2564,7 @@ def ensure_local_venv_packages_on_path() -> None:
 
 def run_matching_background(run_id: int, class_id: int, stop_event: threading.Event) -> None:
     conn = db_conn()
+    started_at_perf = time.perf_counter()
 
     def log(msg: str) -> None:
         with conn:
@@ -2375,6 +2623,8 @@ def run_matching_background(run_id: int, class_id: int, stop_event: threading.Ev
                 )
             for o in result.get("overlaps", []):
                 conn.execute("INSERT INTO overlaps(run_id, s1, s2) VALUES (?, ?, ?)", (run_id, o[0], o[1]))
+        elapsed_s = time.perf_counter() - started_at_perf
+        log(f"run completed in {elapsed_s:.2f}s")
     except Exception as exc:  # noqa: BLE001
         with conn:
             conn.execute(
