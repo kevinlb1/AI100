@@ -1,0 +1,17 @@
+[Unit]
+Description=AI100 web app
+After=network.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__REPO_DIR__
+Environment=APP_BASE_PATH=/AI100
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__REPO_DIR__/run_server.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

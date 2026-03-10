@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import random
 import re
 import sqlite3
@@ -23,6 +24,25 @@ from generate import (
 
 
 DB_PATH = "match_app.db"
+
+
+def normalize_base_path(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw or raw == "/":
+        return ""
+    if not raw.startswith("/"):
+        raw = "/" + raw
+    return raw.rstrip("/")
+
+
+APP_BASE_PATH = normalize_base_path(os.environ.get("APP_BASE_PATH", ""))
+
+
+def app_url(path: str) -> str:
+    raw = path or "/"
+    if not raw.startswith("/"):
+        raw = "/" + raw
+    return f"{APP_BASE_PATH}{raw}" if APP_BASE_PATH else raw
 
 run_state_lock = threading.Lock()
 run_state = {
@@ -963,7 +983,7 @@ def render_home() -> str:
         shadow_chip = build_topic_chip(shadow_topic, is_shadow=True)
         violation_html = "<span class='shadow-violation-star' title='Main/shadow overlap violation'>*</span>" if has_overlap_violation else ""
         matrix_rows.append(
-            f"<tr class='{row_class}' onclick='window.location.href=\"/student?sid={sid}\"'>"
+            f"<tr class='{row_class}' onclick='window.location.href=\"{app_url(f'/student?sid={sid}')}\"'>"
             f"<td class='student-cell' title='{student_name}'>"
             f"<span class='student-main-group'>{main_chip}</span>"
             f"<span class='student-name'>{student_name}</span>"
@@ -977,8 +997,8 @@ def render_home() -> str:
       <p class='muted'>Class: <strong>{escape(class_name)}</strong></p>
       <p>Student editing of preferences: <strong id='lockStatus'>{'Locked' if finalized else 'Unlocked'}</strong></p>
       <div class='top-right-actions'>
-        <a class='button-link' href='/admin'>Open Admin Dashboard</a>
-        <a class='button-link button-danger' href='/shutdown'>Stop server</a>
+        <a class='button-link' href='{app_url("/admin")}'>Open Admin Dashboard</a>
+        <a class='button-link button-danger' href='{app_url("/shutdown")}'>Stop server</a>
       </div>
       <div class='matrix-controls'>
         <button id='topicTitleToggleBtn' type='button'>Expand topic titles</button>
@@ -999,6 +1019,12 @@ def render_home() -> str:
       {latest_html}
     </main>
     <script>
+      const BASE_PATH = {json.dumps(APP_BASE_PATH)};
+      function appUrl(path) {{
+        const raw = String(path || '/');
+        const normalized = raw.startsWith('/') ? raw : '/' + raw;
+        return BASE_PATH ? BASE_PATH + normalized : normalized;
+      }}
       const THEME_MODE_KEY = 'adminThemeMode';
       function applyThemeMode(mode) {{
         const root = document.documentElement;
@@ -1095,7 +1121,7 @@ def render_home() -> str:
       }}
       async function refreshLockStatus() {{
         try {{
-          const r = await fetch('/api/finalized');
+          const r = await fetch(appUrl('/api/finalized'));
           if (!r.ok) return;
           const data = await r.json();
           document.getElementById('lockStatus').innerText = data.finalized ? 'Locked' : 'Unlocked';
@@ -1105,7 +1131,7 @@ def render_home() -> str:
       }}
       async function refreshHomeIfChanged() {{
         try {{
-          const r = await fetch('/api/home_fingerprint');
+          const r = await fetch(appUrl('/api/home_fingerprint'));
           if (!r.ok) return;
           const data = await r.json();
           if ((data.fingerprint || '') !== homeFingerprint) {{
@@ -1493,7 +1519,7 @@ def render_student(sid: int) -> str:
     return f"""
     <html><head><title>Student {sid + 1}</title><style>{base_css()}</style></head><body>
     <main class='container'>
-      <p><a href='/'>← back</a></p>
+      <p><a href='{app_url('/')}'>← back</a></p>
       <h1>Student {sid + 1} preferences</h1>
       <p class='muted'>Drag topics to change their rankings. At most {n // 4} topics can be given score zero, which corresponds to a veto.</p>
       <p>Editing enabled: <strong id='editingState'>{'Yes' if not finalized else 'No (finalized by admin)'}</strong></p>
@@ -1517,6 +1543,12 @@ def render_student(sid: int) -> str:
       <span id='msg' class='muted'></span>
     </main>
     <script>
+      const BASE_PATH = {json.dumps(APP_BASE_PATH)};
+      function appUrl(path) {{
+        const raw = String(path || '/');
+        const normalized = raw.startsWith('/') ? raw : '/' + raw;
+        return BASE_PATH ? BASE_PATH + normalized : normalized;
+      }}
       const THEME_MODE_KEY = 'adminThemeMode';
       function applyThemeMode(mode) {{
         const root = document.documentElement;
@@ -1664,7 +1696,7 @@ def render_student(sid: int) -> str:
         prefSaveInFlight = true;
         prefMsg.innerText = 'Saving...';
         try {{
-          const res = await fetch(`/api/student/${{sid}}/preferences`, {{
+          const res = await fetch(appUrl(`/api/student/${{sid}}/preferences`), {{
             method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{scores}})
           }});
           const data = await res.json();
@@ -1706,7 +1738,8 @@ def render_student(sid: int) -> str:
           inFlight = true;
           msg.innerText = 'Saving...';
           try {{
-            const res = await fetch(endpoint, {{
+            const url = appUrl(endpoint);
+            const res = await fetch(url, {{
               method:'POST',
               headers:{{'Content-Type':'application/json'}},
               body:JSON.stringify({{ [payloadKey]: value }})
@@ -1752,7 +1785,7 @@ def render_student(sid: int) -> str:
 
       async function refreshStudentMeta() {{
         try {{
-          const res = await fetch('/api/students_meta');
+          const res = await fetch(appUrl('/api/students_meta'));
           if (!res.ok) return;
           const data = await res.json();
           if (!Array.isArray(data.students)) return;
@@ -1795,10 +1828,10 @@ def render_admin() -> str:
     return f"""
     <html><head><title>Admin</title><style>{base_css()}</style></head><body>
     <main class='container'>
-      <p><a href='/'>← back</a></p>
+      <p><a href='{app_url('/')}'>← back</a></p>
       <h1>Admin dashboard</h1>
       <div class='top-right-actions'>
-        <a class='button-link button-danger' href='/shutdown'>Stop server</a>
+        <a class='button-link button-danger' href='{app_url("/shutdown")}'>Stop server</a>
       </div>
       <div style='margin:12px 0;'>
         <div class='inline-finalize'>
@@ -1870,6 +1903,12 @@ def render_admin() -> str:
       </section>
     </main>
     <script>
+      const BASE_PATH = {json.dumps(APP_BASE_PATH)};
+      function appUrl(path) {{
+        const raw = String(path || '/');
+        const normalized = raw.startsWith('/') ? raw : '/' + raw;
+        return BASE_PATH ? BASE_PATH + normalized : normalized;
+      }}
       const THEME_MODE_KEY = 'adminThemeMode';
       function applyThemeMode(mode) {{
         const root = document.documentElement;
@@ -1904,7 +1943,7 @@ def render_admin() -> str:
         applyThemeMode(mode);
       }}
       async function post(path, body={{}}) {{
-        const r = await fetch(path, {{method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify(body)}});
+        const r = await fetch(appUrl(path), {{method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify(body)}});
         const data = await r.json();
         data.__ok = r.ok;
         return data;
@@ -2058,7 +2097,7 @@ def render_admin() -> str:
         pulseButton(btn);
         let students = [];
         try {{
-          const r = await fetch('/api/students_meta');
+          const r = await fetch(appUrl('/api/students_meta'));
           if (r.ok) {{
             const data = await r.json();
             students = (data.students || []).slice().sort((a,b) => Number(a.id) - Number(b.id));
@@ -2111,7 +2150,7 @@ def render_admin() -> str:
         await poll();
       }}
       function downloadCsv() {{
-        window.location.href = '/api/admin/export_csv';
+        window.location.href = appUrl('/api/admin/export_csv');
       }}
       async function importCsv(btn) {{
         pulseButton(btn);
@@ -2418,7 +2457,7 @@ def render_admin() -> str:
       async function poll() {{
         let nextMs = 1200;
         try {{
-          const r = await fetch('/api/admin/status');
+          const r = await fetch(appUrl('/api/admin/status'));
           const data = await r.json();
           document.getElementById('status').innerText = data.running ? 'Matching in progress...' : '';
           setRunControlMode(!!data.running);
@@ -2429,7 +2468,7 @@ def render_admin() -> str:
           let classId = data.class_id;
           if (!classes.length) {{
             try {{
-              const clsResp = await fetch('/api/admin/classes');
+              const clsResp = await fetch(appUrl('/api/admin/classes'));
               if (clsResp.ok) {{
                 const clsData = await clsResp.json();
                 if (Array.isArray(clsData.classes) && clsData.classes.length) {{
@@ -2705,7 +2744,7 @@ def application(environ, start_response):
     if method == "GET" and path == "/launch":
         return html_response(
             start_response,
-            """
+            f"""
             <html><head><title>Launching app...</title><style>
             body{font-family:Arial,sans-serif;background:#f3f6fb;margin:0;padding:24px;}
             .box{max-width:780px;margin:40px auto;background:#fff;border-radius:10px;padding:24px;box-shadow:0 2px 9px rgba(0,0,0,.08);}
@@ -2716,25 +2755,25 @@ def application(environ, start_response):
               <div class='box'>
                 <h1>Launching app...</h1>
                 <p id='msg'>Opening the app in a new tab.</p>
-                <p class='muted' id='hint' style='display:none;'>If a pop-up was blocked, click this link: <a href='/' target='_blank'>Open app</a></p>
+                <p class='muted' id='hint' style='display:none;'>If a pop-up was blocked, click this link: <a href='{app_url("/")}' target='_blank'>Open app</a></p>
               </div>
               <script>
-                (function () {
+                (function () {{
                   var opened = null;
-                  try {
-                    opened = window.open('/?script_opened=1', '_blank');
-                  } catch (e) {
+                  try {{
+                    opened = window.open({json.dumps(app_url('/?script_opened=1'))}, '_blank');
+                  }} catch (e) {{
                     opened = null;
-                  }
-                  if (opened) {
-                    try { opened.focus(); } catch (e) {}
+                  }}
+                  if (opened) {{
+                    try {{ opened.focus(); }} catch (e) {{}}
                     document.getElementById('msg').textContent = 'App opened. This launcher will close.';
-                    setTimeout(function () { try { window.close(); } catch (e) {} }, 600);
-                  } else {
+                    setTimeout(function () {{ try {{ window.close(); }} catch (e) {{}} }}, 600);
+                  }} else {{
                     document.getElementById('msg').textContent = 'Your browser blocked automatic tab opening.';
                     document.getElementById('hint').style.display = 'block';
-                  }
-                })();
+                  }}
+                }})();
               </script>
             </body></html>
             """,
@@ -3093,7 +3132,7 @@ def application(environ, start_response):
         ok = request_server_shutdown()
         if not ok:
             return json_response(start_response, {"error": "Server is not running."}, "503 Service Unavailable")
-        return json_response(start_response, {"message": "Server shutdown requested.", "redirect": "/stopped"})
+        return json_response(start_response, {"message": "Server shutdown requested.", "redirect": app_url("/stopped")})
 
     if method == "GET" and path == "/api/admin/status":
         conn = db_conn()
