@@ -1,1 +1,4 @@
 match_app.db
+__pycache__/
+*.py[cod]
+AI100-fionavar.code-workspace
