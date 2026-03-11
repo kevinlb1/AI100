@@ -2747,10 +2747,10 @@ def application(environ, start_response):
             start_response,
             f"""
             <html><head><title>Launching app...</title><style>
-            body{font-family:Arial,sans-serif;background:#f3f6fb;margin:0;padding:24px;}
-            .box{max-width:780px;margin:40px auto;background:#fff;border-radius:10px;padding:24px;box-shadow:0 2px 9px rgba(0,0,0,.08);}
-            h1{margin-top:0;}
-            .muted{color:#64748b;}
+            body{{font-family:Arial,sans-serif;background:#f3f6fb;margin:0;padding:24px;}}
+            .box{{max-width:780px;margin:40px auto;background:#fff;border-radius:10px;padding:24px;box-shadow:0 2px 9px rgba(0,0,0,.08);}}
+            h1{{margin-top:0;}}
+            .muted{{color:#64748b;}}
             </style></head>
             <body>
               <div class='box'>
