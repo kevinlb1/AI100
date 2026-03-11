@@ -2727,7 +2727,8 @@ def request_server_shutdown() -> bool:
 
 def application(environ, start_response):
     ensure_db_initialized()
-    path = urlparse(environ.get("PATH_INFO", "/")).path
+    raw_path = environ.get("PATH_INFO", "/") or "/"
+    path = urlparse(raw_path).path or "/"
     method = environ.get("REQUEST_METHOD", "GET")
 
     if method == "GET" and path == "/":
