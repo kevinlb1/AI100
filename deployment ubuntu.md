@@ -11,6 +11,7 @@ If you want the app at `http://[machine]/AI100`, use the production setup. The a
 
 - `nginx` listens on port `80`
 - `nginx` proxies `/AI100/` to `gunicorn` on `127.0.0.1:8000`
+- `gunicorn` should run with a single worker for this app's threaded solver jobs
 - `systemd` keeps `gunicorn` running
 - the app stores its SQLite database in `match_app.db` in the repo root
 
@@ -137,6 +138,7 @@ That serves the app directly on:
 ## Notes
 
 - `wsgiref` in `app.py` is fine for local testing, but `gunicorn + nginx` is the correct deployment model for a stable Ubuntu web app.
+- The default `gunicorn.conf.py` now uses `1` worker because live solver runs are managed by background threads inside the web process. If you override `GUNICORN_WORKERS`, keep it at `1` unless the run orchestration is redesigned for multi-process execution.
 - If Ubuntu firewall rules are enabled, allow HTTP:
 
 ```bash

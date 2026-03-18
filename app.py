@@ -233,6 +233,17 @@ def ensure_class_meta_defaults(conn: sqlite3.Connection, class_id: int, n_defaul
         set_class_meta(conn, class_id, "finalized", finalized_default)
 
 
+def get_active_match_run(conn: sqlite3.Connection, class_id: int | None = None) -> sqlite3.Row | None:
+    if class_id is None:
+        return conn.execute(
+            "SELECT * FROM match_runs WHERE status='running' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return conn.execute(
+        "SELECT * FROM match_runs WHERE class_id=? AND status='running' ORDER BY id DESC LIMIT 1",
+        (class_id,),
+    ).fetchone()
+
+
 def initialize_db() -> None:
     conn = db_conn()
     with conn:
@@ -2869,6 +2880,9 @@ def application(environ, start_response):
         n = max(4, n)
         confirm_delete = parse_bool(data.get("confirm_delete"))
         conn = db_conn()
+        if get_active_match_run(conn) is not None:
+            conn.close()
+            return json_response(start_response, {"error": "Cannot change n while a run is in progress."}, "409 Conflict")
         class_id = get_current_class_id(conn)
         prev_n = int(get_class_meta(conn, class_id, "n", "8"))
         doomed_students = []
@@ -2914,26 +2928,26 @@ def application(environ, start_response):
         return json_response(start_response, {"message": msg})
 
     if method == "POST" and path == "/api/admin/add_students":
-        with run_state_lock:
-            if run_state["thread"] is not None:
-                return json_response(start_response, {"error": "Cannot add students while a run is in progress."}, "409 Conflict")
         data = read_json(environ)
         count = int(data.get("count", 0))
         conn = db_conn()
+        if get_active_match_run(conn) is not None:
+            conn.close()
+            return json_response(start_response, {"error": "Cannot add students while a run is in progress."}, "409 Conflict")
         class_id = get_current_class_id(conn)
         ok, msg = add_students_to_class(conn, class_id, count)
         conn.close()
         return json_response(start_response, {"message": msg} if ok else {"error": msg}, "200 OK" if ok else "400 Bad Request")
 
     if method == "POST" and path == "/api/admin/remove_students":
-        with run_state_lock:
-            if run_state["thread"] is not None:
-                return json_response(start_response, {"error": "Cannot remove students while a run is in progress."}, "409 Conflict")
         data = read_json(environ)
         raw_ids = data.get("student_ids", [])
         if not isinstance(raw_ids, list):
             return json_response(start_response, {"error": "student_ids must be a list."}, "400 Bad Request")
         conn = db_conn()
+        if get_active_match_run(conn) is not None:
+            conn.close()
+            return json_response(start_response, {"error": "Cannot remove students while a run is in progress."}, "409 Conflict")
         class_id = get_current_class_id(conn)
         ok, msg = remove_students_from_class(conn, class_id, raw_ids)
         conn.close()
@@ -2941,6 +2955,9 @@ def application(environ, start_response):
 
     if method == "POST" and path == "/api/admin/reset":
         conn = db_conn()
+        if get_active_match_run(conn) is not None:
+            conn.close()
+            return json_response(start_response, {"error": "Cannot reset while a run is in progress."}, "409 Conflict")
         class_id = get_current_class_id(conn)
         with conn:
             conn.execute("DELETE FROM students WHERE class_id=?", (class_id,))
@@ -2967,16 +2984,22 @@ def application(environ, start_response):
             if run_state["thread"] is not None:
                 return json_response(start_response, {"error": "Run already in progress."}, "409 Conflict")
             conn = db_conn()
-            class_id = get_current_class_id(conn)
-            finalized = 1 if get_class_meta(conn, class_id, "finalized", "0") == "1" else 0
-            with conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                class_id = get_current_class_id(conn)
+                if get_active_match_run(conn) is not None:
+                    conn.rollback()
+                    return json_response(start_response, {"error": "Run already in progress."}, "409 Conflict")
+                finalized = 1 if get_class_meta(conn, class_id, "finalized", "0") == "1" else 0
                 cur = conn.execute(
                     "INSERT INTO match_runs(class_id, started_at, status, finalized_snapshot) VALUES (?, ?, ?, ?)",
                     (class_id, datetime.now(timezone.utc).isoformat(), "running", finalized),
                 )
                 run_id = cur.lastrowid
                 conn.execute("INSERT INTO progress_logs(run_id, idx, message) VALUES (?, ?, ?)", (run_id, 0, "Run started."))
-            conn.close()
+                conn.commit()
+            finally:
+                conn.close()
 
             stop_event = threading.Event()
             t = threading.Thread(target=run_matching_background, args=(run_id, class_id, stop_event), daemon=True)
@@ -2988,10 +3011,10 @@ def application(environ, start_response):
         return json_response(start_response, {"message": "Run started."})
 
     if method == "POST" and path == "/api/admin/undo_matching":
-        with run_state_lock:
-            if run_state["thread"] is not None:
-                return json_response(start_response, {"error": "Cannot undo while a run is in progress."}, "409 Conflict")
         conn = db_conn()
+        if get_active_match_run(conn) is not None:
+            conn.close()
+            return json_response(start_response, {"error": "Cannot undo while a run is in progress."}, "409 Conflict")
         class_id = get_current_class_id(conn)
         with conn:
             clear_class_matching_data(conn, class_id)
@@ -3007,12 +3030,12 @@ def application(environ, start_response):
         return json_response(start_response, {"current_class_id": current_class_id, "classes": classes})
 
     if method == "POST" and path == "/api/admin/select_class":
-        with run_state_lock:
-            if run_state["thread"] is not None:
-                return json_response(start_response, {"error": "Cannot switch class while a run is in progress."}, "409 Conflict")
         data = read_json(environ)
         class_id = int(data.get("class_id", 0))
         conn = db_conn()
+        if get_active_match_run(conn) is not None:
+            conn.close()
+            return json_response(start_response, {"error": "Cannot switch class while a run is in progress."}, "409 Conflict")
         exists = conn.execute("SELECT 1 FROM classes WHERE id=?", (class_id,)).fetchone() is not None
         if not exists:
             conn.close()
@@ -3024,13 +3047,13 @@ def application(environ, start_response):
         return json_response(start_response, {"message": "Current class switched."})
 
     if method == "POST" and path == "/api/admin/create_class":
-        with run_state_lock:
-            if run_state["thread"] is not None:
-                return json_response(start_response, {"error": "Cannot create/switch class while a run is in progress."}, "409 Conflict")
         data = read_json(environ)
         name = str(data.get("name", "")).strip()
         n = int(data.get("n", 8))
         conn = db_conn()
+        if get_active_match_run(conn) is not None:
+            conn.close()
+            return json_response(start_response, {"error": "Cannot create/switch class while a run is in progress."}, "409 Conflict")
         with conn:
             class_id = create_class(conn, name, n)
             set_current_class_id(conn, class_id)
@@ -3039,12 +3062,12 @@ def application(environ, start_response):
         return json_response(start_response, {"message": "Class created.", "class_id": class_id})
 
     if method == "POST" and path == "/api/admin/delete_class":
-        with run_state_lock:
-            if run_state["thread"] is not None:
-                return json_response(start_response, {"error": "Cannot delete class while a run is in progress."}, "409 Conflict")
         data = read_json(environ)
         requested_class_id = int(data.get("class_id", 0))
         conn = db_conn()
+        if get_active_match_run(conn) is not None:
+            conn.close()
+            return json_response(start_response, {"error": "Cannot delete class while a run is in progress."}, "409 Conflict")
         current_class_id = get_current_class_id(conn)
         class_id = requested_class_id if requested_class_id > 0 else current_class_id
         exists = conn.execute("SELECT 1 FROM classes WHERE id=?", (class_id,)).fetchone() is not None
@@ -3083,10 +3106,19 @@ def application(environ, start_response):
     if method == "POST" and path == "/api/admin/interrupt":
         with run_state_lock:
             stop_event = run_state.get("stop_event")
-            if stop_event is None:
-                return json_response(start_response, {"message": "No active run."})
-            stop_event.set()
-        return json_response(start_response, {"message": "Interrupt requested."})
+            if stop_event is not None:
+                stop_event.set()
+                return json_response(start_response, {"message": "Interrupt requested."})
+        conn = db_conn()
+        active_run = get_active_match_run(conn)
+        conn.close()
+        if active_run is None:
+            return json_response(start_response, {"message": "No active run."})
+        return json_response(
+            start_response,
+            {"error": "Run is active in another web worker. Configure Gunicorn with a single worker for live interrupt support."},
+            "409 Conflict",
+        )
 
     if method == "GET" and path == "/api/admin/export_csv":
         conn = db_conn()
@@ -3105,25 +3137,25 @@ def application(environ, start_response):
         )
 
     if method == "POST" and path == "/api/admin/import_csv":
-        with run_state_lock:
-            if run_state["thread"] is not None:
-                return json_response(start_response, {"error": "Cannot import while a run is in progress."}, "409 Conflict")
         data = read_json(environ)
         csv_text = str(data.get("csv_text", ""))
         conn = db_conn()
+        if get_active_match_run(conn) is not None:
+            conn.close()
+            return json_response(start_response, {"error": "Cannot import while a run is in progress."}, "409 Conflict")
         class_id = get_current_class_id(conn)
         ok, msg = import_class_csv(conn, class_id, csv_text)
         conn.close()
         return json_response(start_response, {"message": msg} if ok else {"error": msg}, "200 OK" if ok else "400 Bad Request")
 
     if method == "POST" and path == "/api/admin/randomize_preferences":
-        with run_state_lock:
-            if run_state["thread"] is not None:
-                return json_response(start_response, {"error": "Cannot randomize while a run is in progress."}, "409 Conflict")
         data = read_json(environ)
         mode = str(data.get("mode", "category"))
         seed = int(time.time() * 1000) & 0x7FFFFFFF
         conn = db_conn()
+        if get_active_match_run(conn) is not None:
+            conn.close()
+            return json_response(start_response, {"error": "Cannot randomize while a run is in progress."}, "409 Conflict")
         class_id = get_current_class_id(conn)
         ok, msg = randomize_class_data(conn, class_id, mode, seed)
         conn.close()
@@ -3141,6 +3173,7 @@ def application(environ, start_response):
         class_row = conn.execute("SELECT id, name FROM classes WHERE id=?", (class_id,)).fetchone()
         n = int(get_class_meta(conn, class_id, "n", "8"))
         finalized = get_class_meta(conn, class_id, "finalized", "0") == "1"
+        active_run = get_active_match_run(conn, class_id)
         latest = conn.execute("SELECT * FROM match_runs WHERE class_id=? ORDER BY id DESC LIMIT 1", (class_id,)).fetchone()
         classes = [dict(r) for r in conn.execute("SELECT id, name FROM classes ORDER BY id").fetchall()]
         selected_topics = []
@@ -3163,8 +3196,7 @@ def application(environ, start_response):
             missing_packages = extract_missing_packages("\n".join(logs))
         conn.close()
 
-        with run_state_lock:
-            running = run_state["thread"] is not None and run_state.get("class_id") == class_id
+        running = active_run is not None
         return json_response(
             start_response,
             {
